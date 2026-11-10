@@ -243,19 +243,27 @@ def download_youtube_broll(
 
     try:
         import yt_dlp
+        from yt_dlp.utils import MaxDownloadsReached
 
         logger.info(f"Searching real footage via YouTube: '{query}'...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([search_term])
+            try:
+                ydl.download([search_term])
+            except MaxDownloadsReached:
+                pass  # Normal expected exit when 1 video is downloaded
 
         if output_video_path.exists() and output_video_path.stat().st_size > 50000:
             return output_video_path
 
-        # Find any matching file written by yt-dlp
         matches = list(output_video_path.parent.glob(f"{output_video_path.stem}.*"))
         if matches and matches[0].stat().st_size > 50000:
             return matches[0]
     except Exception as exc:
+        if output_video_path.exists() and output_video_path.stat().st_size > 50000:
+            return output_video_path
+        matches = list(output_video_path.parent.glob(f"{output_video_path.stem}.*"))
+        if matches and matches[0].stat().st_size > 50000:
+            return matches[0]
         logger.warning(f"YouTube real footage search failed for '{query}': {exc}")
 
     return None
