@@ -1,9 +1,12 @@
 """
-Topic selection and visual director module for Uncensored Talking (@uncensored_talking).
+Topic selection, non-linear hook curation, and visual direction module for Uncensored Talking (@uncensored_talking).
 Analyzes transcripts for controversies, taboos, and emotional peaks.
-Extracts 30-60s clips where the first 3 seconds serve as the viral hook.
-Creates a visual direction plan (SceneCuts every 2-5s) with layouts:
-'full_speaker', 'full_broll', and 'splitscreen'.
+Enforces non-linear hooks:
+- First 3-5s: The most controversial / shocking quote of the topic (even if it occurred at minute 15).
+- Followed by hard cut to reaction/question (e.g. Joe Rogan: "Wait, are you serious?!").
+- Followed by tight narrative payoff with pauses & filler removed.
+- Total clip duration strictly 30 to 60 seconds.
+- Scene cuts every 2-5s with 2-4 abstract visual English search queries.
 """
 
 import json
@@ -45,11 +48,11 @@ class SceneCut(BaseModel):
     end: float = Field(..., description="Local clip end time in seconds")
     layout: LayoutType = Field(
         default="full_speaker",
-        description="Layout mode: 'full_speaker' (1080x1920), 'full_broll' (1080x1920), or 'splitscreen' (top B-Roll, bottom speaker)",
+        description="Layout mode: 'full_speaker' (1080x1920), 'full_broll' (1080x1920), or 'splitscreen' (top B-Roll 1080x960, bottom speaker 1080x960)",
     )
     search_query: str = Field(
         default="",
-        description="Abstract, visual English search terms for B-roll sourcing (e.g. 'helicopter military extraction')",
+        description="2-4 abstract, visual English search terms for B-roll sourcing (e.g. 'military helicopter extraction night')",
     )
     broll_asset_path: str | None = Field(
         default=None,
@@ -72,15 +75,15 @@ class SceneCut(BaseModel):
 class ClipProposal(BaseModel):
     clip_id: int
     title: str = Field(..., description="Short slug / title for the viral clip")
-    hook: str = Field(default="", description="The explosive hook statement used in the first 3s")
+    hook: str = Field(default="", description="The explosive non-linear hook statement used in the first 3-5s")
     rationale: str = Field(default="", description="Why this clip is controversial / viral")
     segments: list[Segment] = Field(
         ...,
-        description="List of video segments to cut from original source (total 30-60s)",
+        description="Non-linear sequence of segments (hook + reaction + payoff) to cut from original source (total 30-60s)",
     )
     scenes: list[SceneCut] = Field(
         default_factory=list,
-        description="Timeline of visual direction scene cuts every 2-5s with layout modes and search queries",
+        description="Timeline of visual direction scene cuts every 2-5s with layout modes and 2-4 search queries",
     )
 
     @property
@@ -109,47 +112,53 @@ class ClipProposal(BaseModel):
         }
 
 
-UNCENSORED_SYSTEM_PROMPT = """You are the Lead Visual Director and Social Media Strategist for the viral channel "@uncensored_talking".
+UNCENSORED_SYSTEM_PROMPT = """You are the Lead Visual Director and Executive Editor for the viral channel "@uncensored_talking".
 Your mission:
-1. Identify the TOP most viral, controversial, taboo-breaking debate moments (duration 30-60 seconds).
-2. The FIRST 3 SECONDS MUST be an irresistible, pattern-interrupting hook.
-3. VISUAL REGIE & B-ROLL TIMELINE: For each clip, create a dynamic visual timeline with scene cuts every 2 to 5 seconds.
-   - layout must be one of:
-     * "full_speaker": 1080x1920 speaker full frame (face centered).
-     * "full_broll": 1080x1920 high impact B-roll footage/image.
-     * "splitscreen": Top half B-roll (1080x960), bottom half speaker (1080x960).
-   - search_query: Abstract, cinematic English search terms matching the subtopic/metaphor (e.g. "helicopter military extraction", "dry aged meat cellar", "laboratory microbes zoom", "money vault gold bars", "deep space galaxy", "police interrogation shadows"). DO NOT use literal names of podcast hosts; use visceral, sensory visual queries.
-   - Timeline starts at 0.0s and ends at total clip duration without gaps.
+Create explosive, highly shareable 30-60 second vertical shorts from podcast/interview transcripts using NON-LINEAR EDITING.
 
-OUTPUT FORMAT:
-Return ONLY a valid JSON list of clip objects matching this schema:
+CRITICAL EDITING PRINCIPLES:
+1. NON-LINEAR HOOK MANDATE:
+   - The first 3 to 5 seconds of the clip MUST be the single most controversial, shocking, or taboo sentence of the discussion (even if it was spoken at minute 15 or 45).
+   - Immediately hard-cut from this hook to the reaction or provocative question (e.g. Joe Rogan: "Wait, are you serious?!"), then continue the core explanation.
+2. TIGHT PACING & JUMP CUTS:
+   - Remove long thinking pauses, filler words, and small talk. Use multiple tight segments if needed.
+3. DURATION:
+   - Total clip duration MUST be strictly between 30 and 60 seconds (sum of all segments).
+4. VISUAL SCENE DIRECTION:
+   - Break the clip down into scenes every 2 to 5 seconds.
+   - Layouts: 'splitscreen', 'full_speaker', 'full_broll'.
+   - search_query: 2-4 visceral, cinematic English keywords (e.g. "military helicopter extraction night", "dry aged steak cellar", "laboratory microbes zoom"). NEVER use names of podcast hosts.
+
+OUTPUT SCHEMA (Return ONLY valid JSON):
 [
   {
     "clip_id": 1,
-    "title": "slug_format_title",
-    "hook": "Transcript excerpt of the opening 3 seconds",
-    "rationale": "Why this debate triggers outrage or curiosity",
+    "title": "slug_title",
+    "hook": "Transcript excerpt of the opening 3-5 seconds",
+    "rationale": "Why this shocks the audience",
     "segments": [
-      {"start": 12.5, "end": 48.0}
+      {"start": 915.2, "end": 919.5},
+      {"start": 120.0, "end": 124.2},
+      {"start": 920.0, "end": 952.0}
     ],
     "scenes": [
       {
         "start": 0.0,
-        "end": 3.0,
+        "end": 3.5,
         "layout": "splitscreen",
-        "search_query": "secret government documents burning"
+        "search_query": "military helicopter extraction night"
       },
       {
-        "start": 3.0,
-        "end": 6.5,
+        "start": 3.5,
+        "end": 7.0,
         "layout": "full_speaker",
         "search_query": ""
       },
       {
-        "start": 6.5,
-        "end": 10.0,
+        "start": 7.0,
+        "end": 11.0,
         "layout": "full_broll",
-        "search_query": "matrix code computer green screen"
+        "search_query": "secret government documents burning"
       }
     ]
   }
@@ -161,7 +170,6 @@ def _load_transcript_data(
     transcript_file: Path | str,
     word_timestamps_file: Path | str,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Loads plain transcript and word timestamps."""
     transcript_file = Path(transcript_file)
     word_timestamps_file = Path(word_timestamps_file)
 
@@ -184,78 +192,70 @@ def generate_heuristic_scenes(
     clip_words: list[dict[str, Any]],
 ) -> list[SceneCut]:
     """
-    Creates a dynamic visual director plan for a clip (scene cuts every 2-5 seconds).
-    Alternates between 'splitscreen', 'full_speaker', and 'full_broll'.
-    Derives abstract visual English search queries from keywords in each time slice.
+    Creates visual director plan with scene cuts every 2-5 seconds.
+    Generates 2-4 cinematic visual English keywords per B-roll scene.
     """
     scenes: list[SceneCut] = []
     current_time = 0.0
 
-    # Abstract visual B-roll topics mapped from keywords
-    TOPIC_BROLL_MAP = [
-        (["secret", "cia", "fbi", "government", "staat", "geheim"], "secret government vault files"),
-        (["money", "billion", "rich", "dollar", "wealth", "geld"], "money cash stack luxury vault"),
-        (["lie", "truth", "fake", "media", "wahrheit", "lüge"], "television studio dark broadcasting"),
-        (["matrix", "ai", "robot", "tech", "code"], "cyberpunk digital matrix computer screen"),
-        (["space", "alien", "ufo", "universe", "mars"], "deep space nebula galaxy stars"),
-        (["food", "meat", "health", "poison", "toxic"], "laboratory microscope cells chemical"),
-        (["war", "army", "military", "weapon", "krieg"], "military drone surveillance tactical"),
-        (["death", "danger", "destroy", "fear", "angst"], "dark storm lightning dramatic clouds"),
-        (["mind", "brain", "think", "insane", "crazy"], "human brain neural network glowing"),
+    KEYWORD_QUERIES = [
+        (["military", "army", "war", "weapon", "defense", "helicopter"], "military helicopter extraction night"),
+        (["money", "billion", "rich", "dollar", "wealth", "gold", "bank"], "money vault gold bullion cinematic"),
+        (["meat", "food", "eat", "diet", "steak", "protein"], "dry aged steak cellar"),
+        (["doctor", "pharma", "medicine", "pill", "drug", "fda", "health"], "laboratory microbes microscope zoom"),
+        (["secret", "cia", "fbi", "government", "classified", "state"], "secret government documents burning"),
+        (["matrix", "ai", "robot", "tech", "code", "computer"], "cyberpunk neon city aerial"),
+        (["police", "crime", "illegal", "jail", "arrest", "court"], "police siren lights dark street"),
+        (["space", "alien", "ufo", "mars", "galaxy", "stars"], "deep space galaxy nebula stars"),
+        (["lie", "truth", "media", "fake", "news", "television"], "cinematic smoke dark spotlight"),
     ]
 
-    # Pre-select pool of high-impact queries
     FALLBACK_QUERIES = [
-        "cinematic smoke dark spotlight",
+        "military helicopter extraction night",
+        "dry aged steak cellar",
+        "laboratory microbes zoom",
         "money vault gold bullion cinematic",
-        "military helicopter night flight",
         "cyberpunk neon city aerial",
-        "laboratory scientific research microscope",
-        "ancient mystery temple dust beams",
         "police siren lights dark street",
     ]
 
-    # Sequence of layouts to cycle through for maximum visual pacing
-    # Opening 3 seconds: splitscreen (Hook + visual reinforcement)
-    layout_cycle: list[LayoutType] = ["splitscreen", "full_speaker", "full_broll", "splitscreen", "full_speaker", "full_broll"]
+    layout_cycle: list[LayoutType] = [
+        "splitscreen",
+        "full_speaker",
+        "full_broll",
+        "splitscreen",
+        "full_speaker",
+        "full_broll",
+    ]
     cycle_idx = 0
 
     while current_time < clip_duration - 0.5:
-        # Determine duration of this scene cut (between 2.5s and 4.0s)
         if current_time == 0.0:
-            scene_dur = min(3.0, clip_duration)
+            scene_dur = min(3.5, clip_duration)
         else:
-            remaining = clip_duration - current_time
-            if remaining <= 4.5:
-                scene_dur = remaining
+            rem = clip_duration - current_time
+            if rem <= 4.5:
+                scene_dur = rem
             else:
-                scene_dur = min(3.2, remaining)
+                scene_dur = min(3.2, rem)
 
         scene_end = round(min(clip_duration, current_time + scene_dur), 2)
         layout = layout_cycle[cycle_idx % len(layout_cycle)]
         cycle_idx += 1
 
-        # Determine visual query for B-roll scenes
         search_query = ""
         if layout in ("full_broll", "splitscreen"):
-            # Inspect words in this time slice
-            slice_words = [
+            slice_text = " ".join(
                 w["word"].lower()
                 for w in clip_words
                 if current_time <= w.get("start", 0) <= scene_end
-            ]
-            slice_text = " ".join(slice_words)
-
-            matched_query = ""
-            for keywords, query in TOPIC_BROLL_MAP:
+            )
+            matched = ""
+            for keywords, query in KEYWORD_QUERIES:
                 if any(kw in slice_text for kw in keywords):
-                    matched_query = query
+                    matched = query
                     break
-
-            if not matched_query:
-                matched_query = FALLBACK_QUERIES[cycle_idx % len(FALLBACK_QUERIES)]
-
-            search_query = matched_query
+            search_query = matched or FALLBACK_QUERIES[cycle_idx % len(FALLBACK_QUERIES)]
 
         scenes.append(
             SceneCut(
@@ -278,13 +278,11 @@ def select_clips_with_llm(
     base_url: str | None = None,
     model: str | None = None,
 ) -> list[ClipProposal]:
-    """
-    Calls OpenAI / OpenAI-compatible API to select viral clips and build B-roll direction timelines.
-    """
+    """Calls LLM with strict non-linear hook mandate and visual scene direction."""
     try:
         from openai import OpenAI
     except ImportError as err:
-        raise ImportError("openai package required for LLM selector. Run pip install openai.") from err
+        raise ImportError("openai package required for LLM selector.") from err
 
     api_key = api_key or os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -295,7 +293,6 @@ def select_clips_with_llm(
 
     client = OpenAI(api_key=api_key, base_url=base_url)
 
-    # Format transcript with periodic timestamps for LLM reference
     formatted_chunks: list[str] = []
     chunk_words: list[str] = []
     chunk_start: float | None = None
@@ -323,20 +320,19 @@ def select_clips_with_llm(
     if len(context_transcript) > 100000:
         context_transcript = context_transcript[:100000] + "\n...[Transcript truncated]"
 
-    user_prompt = f"""Analyze the podcast transcript and extract the TOP {num_clips} most viral, controversial clips for @uncensored_talking.
+    user_prompt = f"""Analyze the podcast transcript and extract the TOP {num_clips} most viral, controversial clips for @uncensored_talking using NON-LINEAR EDITING.
 
-Remember:
-- Total clip length must be between 30 and 60 seconds.
-- The first 3 seconds MUST be the ultimate hook.
-- Create a visual director plan ('scenes') with scene cuts every 2-5 seconds.
-- Use layouts: 'full_speaker', 'full_broll', 'splitscreen'.
-- Provide abstract visual English search queries for B-roll (e.g. 'helicopter military extraction', 'laboratory microbes zoom').
+MANDATORY EDITING RULES:
+1. NON-LINEAR HOOK: The first segment (3-5s) MUST be the explosive shocker quote of the topic (taken from anywhere in the video).
+2. Hard-cut to the reaction/question, then give the narrative explanation.
+3. Total duration strictly 30-60s.
+4. Provide scenes every 2-5s with 2-4 cinematic visual English keywords.
 
-TIMESTAMPED TRANSCRIPT:
+TRANSCRIPT:
 {context_transcript}
 """
 
-    logger.info(f"Sending transcript to LLM ({model_name}) for viral clip curation & B-roll direction...")
+    logger.info(f"Querying LLM ({model_name}) for non-linear hook cuts and visual direction...")
     response = client.chat.completions.create(
         model=model_name,
         messages=[
@@ -348,182 +344,187 @@ TIMESTAMPED TRANSCRIPT:
     )
 
     content = response.choices[0].message.content or "{}"
-    logger.debug(f"LLM Raw Response: {content}")
+    data = json.loads(content)
+    if isinstance(data, dict):
+        for key in ["clips", "proposals", "results", "data"]:
+            if key in data and isinstance(data[key], list):
+                data = data[key]
+                break
+        else:
+            if "segments" in data:
+                data = [data]
 
-    try:
-        data = json.loads(content)
-        if isinstance(data, dict):
-            for key in ["clips", "proposals", "results", "data"]:
-                if key in data and isinstance(data[key], list):
-                    data = data[key]
-                    break
-            else:
-                if "segments" in data:
-                    data = [data]
+    proposals: list[ClipProposal] = []
+    for idx, item in enumerate(data, start=1):
+        if "clip_id" not in item:
+            item["clip_id"] = idx
+        if "title" not in item:
+            item["title"] = f"clip_{idx}"
 
-        proposals: list[ClipProposal] = []
-        for idx, item in enumerate(data, start=1):
-            if "clip_id" not in item:
-                item["clip_id"] = idx
-            if "title" not in item:
-                item["title"] = f"clip_{idx}"
+        raw_scenes = item.get("scenes", [])
+        item["scenes"] = []
+        prop = ClipProposal(**item)
 
-            # Convert scenes if present
-            raw_scenes = item.get("scenes", [])
-            item["scenes"] = []
-            prop = ClipProposal(**item)
+        if raw_scenes:
+            prop.scenes = [SceneCut(**sc) for sc in raw_scenes if "start" in sc and "end" in sc]
 
-            # Validate or populate scenes
-            dur = prop.total_duration
-            if raw_scenes:
-                validated_scenes: list[SceneCut] = []
-                for sc in raw_scenes:
-                    try:
-                        validated_scenes.append(SceneCut(**sc))
-                    except Exception:
-                        pass
-                prop.scenes = validated_scenes
+        if not prop.scenes:
+            clip_words = [
+                w for w in words
+                if any(s.start <= w["start"] <= s.end for s in prop.segments)
+            ]
+            prop.scenes = generate_heuristic_scenes(prop.total_duration, clip_words)
 
-            # If scenes are missing or invalid, generate them via heuristic planner
-            if not prop.scenes:
-                clip_words = [
-                    w for w in words
-                    if any(s.start <= w["start"] <= s.end for s in prop.segments)
-                ]
-                prop.scenes = generate_heuristic_scenes(dur, clip_words)
+        proposals.append(prop)
 
-            proposals.append(prop)
-
-        logger.info(f"LLM successfully generated {len(proposals)} viral clip proposals with visual direction.")
-        return proposals
-    except Exception as exc:
-        logger.error(f"Failed to parse LLM response: {exc}. Response was:\n{content}")
-        raise
+    logger.info(f"LLM generated {len(proposals)} non-linear clip proposals.")
+    return proposals
 
 
 def select_clips_heuristic(
     words: list[dict[str, Any]],
     num_clips: int = 3,
-    target_duration: float = 45.0,
+    target_duration: float = 40.0,
 ) -> list[ClipProposal]:
     """
-    Advanced rule-based heuristic for offline use or when LLM API is unavailable.
-    Scans for controversy/taboo keywords, emotional peaks, and generates
-    the complete 2-5s visual scene direction plan with dynamic layout modes.
+    Advanced heuristic with non-linear hook splicing:
+    1. Finds peak controversy/taboo quotes across the entire duration.
+    2. Takes the top punchy 3.5s quote as the non-linear hook.
+    3. Finds the supporting context/discussion window (30-45s).
+    4. Splices Hook -> Reaction/Body into a cohesive high-retention 35-50s clip.
     """
-    logger.info("Running heuristic viral clip selector & visual director (offline mode)...")
+    logger.info("Running heuristic non-linear clip selector (offline mode)...")
 
     if not words:
         raise ValueError("Word timestamps list is empty.")
 
-    total_audio_duration = words[-1]["end"]
-    if total_audio_duration < 30.0:
-        dur = total_audio_duration
-        scenes = generate_heuristic_scenes(dur, words)
+    total_duration = words[-1]["end"]
+    if total_duration < 30.0:
         return [
             ClipProposal(
                 clip_id=1,
                 title="full_take",
-                hook=" ".join(w["word"] for w in words[:10]),
+                hook=" ".join(w["word"] for w in words[:8]),
                 rationale="Short audio snippet taken in full.",
-                segments=[Segment(start=words[0]["start"], end=dur)],
-                scenes=scenes,
+                segments=[Segment(start=words[0]["start"], end=total_duration)],
+                scenes=generate_heuristic_scenes(total_duration, words),
             )
         ]
 
-    # Keyword bank for @uncensored_talking
     CONTROVERSY_KEYWORDS = {
         "secret", "lie", "lying", "truth", "conspiracy", "matrix", "censored", "illegal",
         "insane", "crazy", "corrupt", "government", "money", "fake", "destroy", "kill",
         "scandal", "exposed", "dangerous", "never", "always", "shocking", "forbidden",
         "alien", "ai", "cia", "fbi", "control", "power", "war", "death", "god", "hell",
         "fear", "manipulated", "silenced", "trap", "elite", "propaganda", "hoax", "hate",
-        "lüge", "wahrheit", "zensiert", "skandal", "geheim", "krass", "verrückt", "elite",
-        "verschwörung", "staat", "medien", "kontrolle", "gefährlich", "geld", "macht",
-        "verboten", "manipuliert", "vernichtet", "schockiert", "angst", "hölle", "zerstört",
+        "meat", "poison", "toxic", "pharma", "fda", "billion", "hospital", "cancer",
     }
 
+    # Score words
     word_scores: list[float] = []
     for w in words:
-        clean = re.sub(r"[^\w\s]", "", w["word"].lower())
+        cl = re.sub(r"[^\w\s]", "", w["word"].lower())
         score = 1.0
-        if clean in CONTROVERSY_KEYWORDS:
-            score += 6.0
+        if cl in CONTROVERSY_KEYWORDS:
+            score += 7.0
         if "?" in w["word"] or "!" in w["word"]:
             score += 2.5
-        if w["word"].isupper() and len(w["word"]) > 2:
-            score += 2.0
         word_scores.append(score)
 
-    candidate_windows: list[dict[str, Any]] = []
+    # 1. Identify top 3-5s explosive hook candidates across the ENTIRE audio
+    hook_candidates: list[dict[str, Any]] = []
     n = len(words)
-
     for i in range(n):
-        start_t = words[i]["start"]
-        for j in range(i + 10, n):
-            end_t = words[j]["end"]
-            dur = end_t - start_t
-            if dur > 58.0:
-                break
-            if 35.0 <= dur <= 55.0:
+        s_t = words[i]["start"]
+        for j in range(i + 3, min(i + 15, n)):
+            e_t = words[j]["end"]
+            dur = e_t - s_t
+            if 3.0 <= dur <= 4.5:
                 score = sum(word_scores[i : j + 1]) / dur
-                candidate_windows.append(
-                    {
-                        "start_idx": i,
-                        "end_idx": j,
-                        "start": start_t,
-                        "end": end_t,
-                        "duration": dur,
-                        "score": score,
-                    }
-                )
-
-    candidate_windows.sort(key=lambda x: x["score"], reverse=True)
-
-    selected: list[dict[str, Any]] = []
-    for cand in candidate_windows:
-        overlap = False
-        for sel in selected:
-            if not (cand["end"] < sel["start"] or cand["start"] > sel["end"]):
-                overlap = True
-                break
-        if not overlap:
-            selected.append(cand)
-            if len(selected) >= num_clips:
-                break
-
-    if not selected:
-        step = max(30.0, total_audio_duration / max(1, num_clips))
-        for k in range(min(num_clips, int(total_audio_duration // 30))):
-            s = k * step
-            e = min(s + 45.0, total_audio_duration)
-            if e - s >= 30.0:
-                selected.append({
-                    "start": s, "end": e, "duration": e - s, "score": 1.0,
-                    "start_idx": 0, "end_idx": len(words)-1
+                hook_candidates.append({
+                    "start": s_t,
+                    "end": e_t,
+                    "score": score,
+                    "words": words[i : j + 1],
                 })
+            elif dur > 4.5:
+                break
+
+    hook_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # 2. Identify top 30-45s discussion segments
+    body_candidates: list[dict[str, Any]] = []
+    for i in range(0, n, 5):
+        s_t = words[i]["start"]
+        for j in range(i + 20, n, 5):
+            e_t = words[j]["end"]
+            dur = e_t - s_t
+            if 30.0 <= dur <= 45.0:
+                score = sum(word_scores[i : j + 1]) / dur
+                body_candidates.append({
+                    "start": s_t,
+                    "end": e_t,
+                    "score": score,
+                    "words": words[i : j + 1],
+                })
+            elif dur > 45.0:
+                break
+
+    body_candidates.sort(key=lambda x: x["score"], reverse=True)
 
     proposals: list[ClipProposal] = []
-    for idx, sel in enumerate(selected, start=1):
-        clip_words = [w for w in words if sel["start"] <= w["start"] <= sel["end"]]
-        hook_words = [w["word"] for w in clip_words if w["start"] - sel["start"] <= 3.2]
-        hook_text = " ".join(hook_words) or "Watch this revelation!"
-        slug = f"uncensored_clip_{idx}_{int(sel['start'])}s"
+    used_times: list[tuple[float, float]] = []
 
-        # Generate 2-5s scene timeline with layout modes and search queries
-        scenes = generate_heuristic_scenes(sel["duration"], clip_words)
+    for idx in range(1, num_clips + 1):
+        # Pick non-overlapping body
+        body = None
+        for b in body_candidates:
+            if not any(not (b["end"] < u[0] or b["start"] > u[1]) for u in used_times):
+                body = b
+                break
+        if not body:
+            body = body_candidates[(idx - 1) % len(body_candidates)]
 
-        proposal = ClipProposal(
-            clip_id=idx,
-            title=slug,
-            hook=hook_text,
-            rationale=f"High controversy score ({sel['score']:.2f}) featuring intense discussion.",
-            segments=[Segment(start=sel["start"], end=sel["end"])],
-            scenes=scenes,
+        used_times.append((body["start"], body["end"]))
+
+        # Pick punchiest hook (ideally non-linear from outside or peak of the body)
+        hook_choice = hook_candidates[(idx - 1) % len(hook_candidates)]
+        hook_text = " ".join(w["word"] for w in hook_choice["words"])
+
+        # Non-linear structure:
+        # Segment 1: Hook quote (3-4s)
+        # Segment 2: Context & explanation body (30-40s)
+        segments: list[Segment] = []
+        if abs(hook_choice["start"] - body["start"]) > 10.0:
+            # True non-linear splice
+            segments = [
+                Segment(start=hook_choice["start"], end=hook_choice["end"]),
+                Segment(start=body["start"], end=min(body["end"], body["start"] + 36.0)),
+            ]
+        else:
+            # Peak starts right at the body
+            segments = [Segment(start=body["start"], end=body["end"])]
+
+        # Visual scenes
+        clip_words = [
+            w for w in words
+            if any(s.start <= w["start"] <= s.end for s in segments)
+        ]
+        total_dur = sum(s.end - s.start for s in segments)
+        scenes = generate_heuristic_scenes(total_dur, clip_words)
+
+        proposals.append(
+            ClipProposal(
+                clip_id=idx,
+                title=f"uncensored_clip_{idx}_{int(segments[0].start)}s",
+                hook=hook_text,
+                rationale=f"High controversy score ({body['score']:.2f}) with explosive non-linear hook.",
+                segments=segments,
+                scenes=scenes,
+            )
         )
-        proposals.append(proposal)
 
-    logger.info(f"Heuristic selector created {len(proposals)} viral clip proposals with visual scene directions.")
+    logger.info(f"Heuristic selector created {len(proposals)} non-linear hook clip proposals.")
     return proposals
 
 
@@ -534,38 +535,21 @@ def select_viral_clips(
     prefer_llm: bool = True,
     output_json_path: Path | str = Path("temp/selected_clips.json"),
 ) -> list[ClipProposal]:
-    """
-    Main entry point for clip selection & visual direction planning.
-    Saves the result to output_json_path.
-    """
     full_text, words = _load_transcript_data(transcript_file, word_timestamps_file)
-
-    proposals: list[ClipProposal] = []
     has_api_key = bool(os.getenv("OPENAI_API_KEY"))
 
     if prefer_llm and has_api_key:
         try:
-            proposals = select_clips_with_llm(
-                full_text=full_text,
-                words=words,
-                num_clips=num_clips,
-            )
+            proposals = select_clips_with_llm(full_text, words, num_clips=num_clips)
         except Exception as exc:
-            logger.warning(
-                f"LLM clip selection failed ({exc}). Falling back to heuristic selector..."
-            )
+            logger.warning(f"LLM selection failed: {exc}. Using heuristic non-linear selector.")
             proposals = select_clips_heuristic(words, num_clips=num_clips)
     else:
-        if prefer_llm and not has_api_key:
-            logger.info("No OPENAI_API_KEY found in environment. Using heuristic selector.")
         proposals = select_clips_heuristic(words, num_clips=num_clips)
 
     output_json_path = Path(output_json_path)
     output_json_path.parent.mkdir(parents=True, exist_ok=True)
-
-    output_data = [p.to_output_dict() for p in proposals]
     with open(output_json_path, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, indent=2, ensure_ascii=False)
+        json.dump([p.to_output_dict() for p in proposals], f, indent=2, ensure_ascii=False)
 
-    logger.info(f"Saved {len(proposals)} selected clip definitions with visual timelines to: {output_json_path}")
     return proposals

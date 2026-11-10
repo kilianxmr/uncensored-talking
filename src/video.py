@@ -1,9 +1,12 @@
 """
 Video processing module for Uncensored Talking (@uncensored_talking).
-Features:
-- Dynamic Face Tracking & Centering via OpenCV Haar-Cascades.
-- 3 Layout Modes: 'full_speaker' (1080x1920), 'full_broll' (1080x1920), and 'splitscreen' (top B-roll 1080x960, bottom speaker 1080x960).
-- Seamless scene montage, master audio synchronization, and center-aligned ASS subtitle burning.
+Anti-Stretch & Dynamic Face Tracking:
+- STRICT PROPORTIONAL SCALING: scale=-1:1920 (full) or scale=-1:960 (split) followed by crop.
+  Never stretches video.
+- DYNAMIC CENTERING: Tracks face/forehead center using MediaPipe / OpenCV with a smoothed
+  moving average over 30 frames.
+- 3 Layout Modes: 'full_speaker', 'full_broll', 'splitscreen'.
+- Frame-accurate subtitle overlay burning using Pillow transparent PNG sequence with vertical gradient.
 - Hardware-accelerated h264_nvenc rendering with CPU libx264 fallback.
 """
 
@@ -11,6 +14,10 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
 
 from .selector import ClipProposal, SceneCut, Segment
 
@@ -20,9 +27,7 @@ _NVENC_AVAILABLE: bool | None = None
 
 
 def check_nvenc_support() -> bool:
-    """
-    Checks if FFmpeg supports h264_nvenc and whether an NVIDIA GPU is functional.
-    """
+    """Checks if FFmpeg supports h264_nvenc and hardware encoder is functional."""
     global _NVENC_AVAILABLE
     if _NVENC_AVAILABLE is not None:
         return _NVENC_AVAILABLE
@@ -62,78 +67,126 @@ def get_video_dimensions(video_path: Path | str) -> tuple[int, int]:
         w_str, h_str = res.stdout.strip().split(",")
         return int(w_str), int(h_str)
     except Exception:
-        # Default standard 1080p 16:9
         return 1920, 1080
 
 
-def detect_speaker_face_x(
+def escape_ffmpeg_filter_path(file_path: Path | str) -> str:
+    """Escapes file paths for FFmpeg filter expressions."""
+    path_str = Path(file_path).resolve().as_posix()
+    return path_str.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
+def compute_smoothed_face_trajectory(
     video_path: Path | str,
     start_time: float,
     end_time: float,
     orig_w: int,
     orig_h: int,
-    crop_w: int,
+    target_crop_w: int,
+    target_h: int,
+    smooth_window: int = 30,
 ) -> int:
     """
-    Uses OpenCV Haar-Cascade to detect the speaker's face in the 16:9 original
-    and calculates the optimal horizontal crop position (crop_x).
-    Keeps the head in the horizontal center of the 9:16 frame.
+    Tracks face/forehead center using MediaPipe / OpenCV over the scene duration.
+    Calculates moving average over 30 frames to guarantee smooth horizontal centering
+    without sudden jumps or jitter.
+    Returns the smoothed crop_x coordinate in proportionally scaled space.
     """
-    default_x = max(0, (orig_w - crop_w) // 2)
+    scale_factor = target_h / float(orig_h)
+    scaled_w = int(orig_w * scale_factor)
+    default_crop_x = max(0, (scaled_w - target_crop_w) // 2)
 
+    duration = max(0.4, end_time - start_time)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return default_crop_x
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    start_frame = int(start_time * fps)
+    end_frame = int(end_time * fps)
+    num_frames = max(1, end_frame - start_frame)
+
+    # Sample 30 frames evenly across the scene
+    sample_indices = np.linspace(start_frame, max(start_frame, end_frame - 1), min(30, num_frames), dtype=int)
+
+    # 1. Try MediaPipe Face Detection
+    mp_face_detector = None
     try:
-        import cv2
-
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        face_cascade = cv2.CascadeClassifier(cascade_path)
-        if face_cascade.empty():
-            return default_x
-
-        cap = cv2.VideoCapture(str(video_path))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
-        detected_centers: list[float] = []
-        duration = max(0.5, end_time - start_time)
-        # Sample up to 8 frames evenly spaced
-        sample_times = [start_time + duration * (i + 1) / 9.0 for i in range(8)]
-
-        for t in sample_times:
-            frame_num = int(t * fps)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                continue
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.15,
-                minNeighbors=4,
-                minSize=(50, 50),
+        import mediapipe as mp
+        if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
+            mp_face_detector = mp.solutions.face_detection.FaceDetection(
+                model_selection=1, min_detection_confidence=0.5
             )
+    except Exception:
+        mp_face_detector = None
+
+    # OpenCV Cascade Fallback
+    cascade = None
+    try:
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        cascade = cv2.CascadeClassifier(cascade_path)
+    except Exception:
+        pass
+
+    raw_centers: list[float] = []
+
+    for f_idx in sample_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(f_idx))
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            continue
+
+        center_x = None
+
+        # MediaPipe attempt
+        if mp_face_detector is not None:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = mp_face_detector.process(rgb)
+            if results and results.detections:
+                # Primary face
+                det = results.detections[0]
+                bb = det.location_data.relative_bounding_box
+                # Forehead / eye level center
+                center_x = (bb.xmin + bb.width / 2.0) * orig_w
+
+        # OpenCV Haar fallback
+        if center_x is None and cascade is not None and not cascade.empty():
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(50, 50))
             if len(faces) > 0:
-                # Pick largest face (main speaker)
                 largest = max(faces, key=lambda f: f[2] * f[3])
-                fx = largest[0] + largest[2] / 2.0
-                detected_centers.append(fx)
+                center_x = largest[0] + largest[2] / 2.0
 
-        cap.release()
+        if center_x is not None:
+            raw_centers.append(center_x)
 
-        if detected_centers:
-            # Use median center for stability against sudden head turns
-            detected_centers.sort()
-            median_face_x = detected_centers[len(detected_centers) // 2]
-            crop_x = int(median_face_x - crop_w / 2.0)
-            return max(0, min(crop_x, orig_w - crop_w))
+    cap.release()
+    if mp_face_detector is not None:
+        try:
+            mp_face_detector.close()
+        except Exception:
+            pass
 
-    except Exception as exc:
-        logger.debug(f"OpenCV face tracking fallback: {exc}")
+    if not raw_centers:
+        return default_crop_x
 
-    return default_x
+    # 2. Compute 30-frame moving average smoothing
+    if len(raw_centers) >= 5:
+        w_size = min(smooth_window, len(raw_centers))
+        kernel = np.ones(w_size) / w_size
+        smoothed = np.convolve(raw_centers, kernel, mode="valid")
+        final_center = float(np.mean(smoothed))
+    else:
+        final_center = float(np.median(raw_centers))
+
+    # Translate to proportionally scaled space
+    scaled_center_x = final_center * scale_factor
+    crop_x = int(scaled_center_x - target_crop_w / 2.0)
+    return max(0, min(crop_x, scaled_w - target_crop_w))
 
 
 def map_clip_time_to_source(t_local: float, segments: list[Segment]) -> float:
-    """Translates local clip timeline (0.0 to dur) back into source video timestamp."""
+    """Translates local clip timeline back to source video timestamp."""
     offset = 0.0
     for seg in segments:
         dur = seg.end - seg.start
@@ -143,45 +196,43 @@ def map_clip_time_to_source(t_local: float, segments: list[Segment]) -> float:
     return segments[-1].end
 
 
-def escape_ffmpeg_filter_path(file_path: Path | str) -> str:
-    """Escapes file paths for FFmpeg filter expressions."""
-    path_str = Path(file_path).resolve().as_posix()
-    return path_str.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-
-
 def render_scene_plate(
     source_video: Path,
     scene: SceneCut,
     clip_segments: list[Segment],
     orig_w: int,
     orig_h: int,
-    crop_w: int,
     output_plate: Path,
 ) -> Path:
     """
-    Renders a single scene into an intermediate 1080x1920 30fps video plate
-    according to its layout: 'full_speaker', 'full_broll', or 'splitscreen'.
+    Renders a single scene plate:
+    - full_speaker: 1080x1920 (proportional scale=-1:1920, smoothed face crop).
+    - full_broll: 1080x1920 (proportional scale=-1:1920, center crop).
+    - splitscreen: Top B-Roll 1080x960, Bottom Speaker 1080x960 (proportional scale=-1:960, smoothed face crop).
     """
     output_plate.parent.mkdir(parents=True, exist_ok=True)
     dur = scene.duration
     src_start = map_clip_time_to_source(scene.start, clip_segments)
     src_end = map_clip_time_to_source(scene.end, clip_segments)
 
-    # Face center position for the speaker in this scene
-    crop_x = detect_speaker_face_x(
-        video_path=source_video,
-        start_time=src_start,
-        end_time=src_end,
-        orig_w=orig_w,
-        orig_h=orig_h,
-        crop_w=crop_w,
-    )
-
     broll_path = Path(scene.broll_asset_path) if scene.broll_asset_path else None
 
-    # Layout 1: full_speaker
+    # 1. full_speaker (1080x1920)
     if scene.layout == "full_speaker" or not broll_path or not broll_path.exists():
-        vf = f"crop={crop_w}:{orig_h}:{crop_x}:0,scale=1080:1920:flags=lanczos,setsar=1,fps=30"
+        crop_x = compute_smoothed_face_trajectory(
+            video_path=source_video,
+            start_time=src_start,
+            end_time=src_end,
+            orig_w=orig_w,
+            orig_h=orig_h,
+            target_crop_w=1080,
+            target_h=1920,
+        )
+        vf = (
+            f"scale=-1:1920:flags=lanczos,"
+            f"crop=1080:1920:{crop_x}:0,"
+            f"setsar=1,fps=30"
+        )
         cmd = [
             "ffmpeg", "-y",
             "-ss", f"{src_start:.3f}",
@@ -195,9 +246,13 @@ def render_scene_plate(
             str(output_plate),
         ]
 
-    # Layout 2: full_broll
+    # 2. full_broll (1080x1920)
     elif scene.layout == "full_broll":
-        vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
+        vf = (
+            "scale=-1:1920:flags=lanczos,"
+            "crop=1080:1920:(in_w-1080)/2:0,"
+            "setsar=1,fps=30"
+        )
         cmd = [
             "ffmpeg", "-y",
             "-i", str(broll_path),
@@ -210,11 +265,20 @@ def render_scene_plate(
             str(output_plate),
         ]
 
-    # Layout 3: splitscreen (Top B-Roll 1080x960, Bottom Speaker 1080x960)
+    # 3. splitscreen (Top B-Roll 1080x960, Bottom Speaker 1080x960)
     else:  # splitscreen
+        crop_x_split = compute_smoothed_face_trajectory(
+            video_path=source_video,
+            start_time=src_start,
+            end_time=src_end,
+            orig_w=orig_w,
+            orig_h=orig_h,
+            target_crop_w=1080,
+            target_h=960,
+        )
         filter_complex = (
-            f"[0:v]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1,fps=30[top];"
-            f"[1:v]crop={crop_w}:{orig_h}:{crop_x}:0,scale=1080:960:flags=lanczos,setsar=1,fps=30[bot];"
+            f"[0:v]scale=-1:960:flags=lanczos,crop=1080:960:(in_w-1080)/2:0,setsar=1,fps=30[top];"
+            f"[1:v]scale=-1:960:flags=lanczos,crop=1080:960:{crop_x_split}:0,setsar=1,fps=30[bot];"
             f"[top][bot]vstack=inputs=2[out]"
         )
         cmd = [
@@ -240,22 +304,25 @@ def render_scene_plate(
 def render_clip(
     source_video_path: Path | str,
     clip: ClipProposal,
-    subtitles_ass_path: Path | str,
+    subtitles_source: Path | str | None = None,
     output_dir: Path | str = Path("output"),
     force_encoder: str | None = None,
     overwrite: bool = True,
+    subtitles_ass_path: Path | str | None = None,
 ) -> Path:
     """
-    Renders the complete viral short:
-    1. Renders each SceneCut according to layout ('full_speaker', 'full_broll', 'splitscreen')
-       with face tracking.
-    2. Stitches scene plates seamlessly together.
-    3. Trims and matches the master audio track.
-    4. Burns ASS subtitles centered on screen.
-    5. Exports with h264_nvenc (or CPU fallback).
+    Renders complete viral short:
+    1. Renders scene cuts with anti-stretch proportional scaling & dynamic face tracking.
+    2. Stitches visual scene plates together.
+    3. Extracts master audio corresponding to non-linear cut segments.
+    4. Burns in Pillow PNG gradient subtitles via FFmpeg overlay (or ASS fallback).
+    5. Exports with NVENC or libx264.
     """
     source_video_path = Path(source_video_path).resolve()
-    subtitles_ass_path = Path(subtitles_ass_path).resolve()
+    sub_arg = subtitles_source or subtitles_ass_path
+    if sub_arg is None:
+        raise ValueError("Either subtitles_source or subtitles_ass_path must be provided to render_clip.")
+    subtitles_path = Path(sub_arg).resolve()
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -266,13 +333,7 @@ def render_clip(
         logger.info(f"Clip {clip.clip_id} already exists at: {output_clip_path}")
         return output_clip_path
 
-    logger.info(
-        f"Rendering Clip {clip.clip_id} ('{clip.title}'). Total duration: {clip.total_duration:.1f}s, "
-        f"{len(clip.scenes)} scenes with dynamic layouts..."
-    )
-
     if not clip.scenes:
-        logger.info(f"No scenes provided for Clip {clip.clip_id}. Generating default full_speaker scene...")
         clip.scenes = [
             SceneCut(
                 start=0.0,
@@ -283,10 +344,10 @@ def render_clip(
         ]
 
     orig_w, orig_h = get_video_dimensions(source_video_path)
-    # 9:16 crop width for the original height
-    crop_w = int(orig_h * 9 / 16)
-    if crop_w % 2 != 0:
-        crop_w += 1
+    logger.info(
+        f"Rendering Clip {clip.clip_id} ('{clip.title}'). Source: {orig_w}x{orig_h}, "
+        f"Duration: {clip.total_duration:.1f}s across {len(clip.scenes)} scenes..."
+    )
 
     temp_scenes_dir = Path("temp") / "scenes" / f"clip_{clip.clip_id}"
     temp_scenes_dir.mkdir(parents=True, exist_ok=True)
@@ -295,17 +356,12 @@ def render_clip(
     scene_plates: list[Path] = []
     for idx, scene in enumerate(clip.scenes, start=1):
         plate_file = temp_scenes_dir / f"scene_{idx}_{scene.layout}.mp4"
-        logger.debug(
-            f"  -> Scene {idx}/{len(clip.scenes)} [{scene.start:.1f}s-{scene.end:.1f}s]: "
-            f"Layout={scene.layout}, Query='{scene.search_query}'"
-        )
         rendered_plate = render_scene_plate(
             source_video=source_video_path,
             scene=scene,
             clip_segments=clip.segments,
             orig_w=orig_w,
             orig_h=orig_h,
-            crop_w=crop_w,
             output_plate=plate_file,
         )
         scene_plates.append(rendered_plate)
@@ -316,7 +372,7 @@ def render_clip(
         for plate in scene_plates:
             f.write(f"file '{plate.resolve().as_posix()}'\n")
 
-    # 3. Extract matching master audio for this clip
+    # 3. Master audio track extraction
     clip_audio_file = temp_scenes_dir / "master_audio.wav"
     num_segs = len(clip.segments)
     if num_segs == 1:
@@ -350,10 +406,9 @@ def render_clip(
             "-ac", "2",
             str(clip_audio_file),
         ]
-
     subprocess.run(cmd_audio, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # 4. Final assembly: Concatenated visual plates + Master Audio + Burn Subtitles
+    # 4. Final render with subtitle overlay
     if force_encoder:
         use_nvenc = force_encoder.lower() in ("nvenc", "h264_nvenc")
     else:
@@ -365,19 +420,33 @@ def render_clip(
         else:
             use_nvenc = check_nvenc_support()
 
-    escaped_ass = escape_ffmpeg_filter_path(subtitles_ass_path)
-    vf_subtitles = f"ass='{escaped_ass}'"
+    # Determine if subtitle source is PNG concat file or ASS file
+    is_png_concat = subtitles_path.name.endswith(".txt") or (
+        subtitles_path.is_file() and "subtitles_concat" in subtitles_path.name
+    )
 
-    cmd_final = [
-        "ffmpeg", "-y" if overwrite else "-n",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(concat_list_file),
-        "-i", str(clip_audio_file),
-        "-vf", vf_subtitles,
-        "-map", "0:v",
-        "-map", "1:a",
-    ]
+    if is_png_concat:
+        # Burning via FFmpeg overlay
+        cmd_final = [
+            "ffmpeg", "-y" if overwrite else "-n",
+            "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+            "-f", "concat", "-safe", "0", "-i", str(subtitles_path),
+            "-i", str(clip_audio_file),
+            "-filter_complex", "[0:v][1:v]overlay=0:0:shortest=1[v_final]",
+            "-map", "[v_final]",
+            "-map", "2:a",
+        ]
+    else:
+        # Fallback ASS burning
+        escaped_ass = subtitles_path.as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        cmd_final = [
+            "ffmpeg", "-y" if overwrite else "-n",
+            "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+            "-i", str(clip_audio_file),
+            "-vf", f"ass='{escaped_ass}'",
+            "-map", "0:v",
+            "-map", "1:a",
+        ]
 
     if use_nvenc:
         cmd_final.extend([

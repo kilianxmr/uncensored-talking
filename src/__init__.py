@@ -8,7 +8,7 @@ from .downloader import download_youtube_video
 from .transcribe import transcribe_audio
 from .selector import select_viral_clips, ClipProposal, Segment, SceneCut
 from .broll_engine import source_broll_for_clip
-from .subtitles import generate_ass_subtitles
+from .subtitles import generate_png_subtitles, generate_ass_subtitles
 from .video import render_clip, check_nvenc_support
 
 __all__ = [
@@ -20,6 +20,7 @@ __all__ = [
     "Segment",
     "SceneCut",
     "source_broll_for_clip",
+    "generate_png_subtitles",
     "generate_ass_subtitles",
     "render_clip",
     "check_nvenc_support",

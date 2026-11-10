@@ -1,250 +1,172 @@
 """
-B-Roll asset sourcing and motion engine for Uncensored Talking (@uncensored_talking).
-Fetches relevant vertical/horizontal video clips or high-res images from:
-- Pexels API (PEXELS_API_KEY)
-- Pixabay API (PIXABAY_API_KEY)
-- Wikimedia Commons / CC0 public search
-Applies smooth Ken-Burns effect (1.0x -> 1.15x zoom/pan) on static images via FFmpeg.
+Real-Footage B-Roll Engine for Uncensored Talking (@uncensored_talking).
+Sourcing & Motion Architecture:
+- Searches real footage via yt-dlp: ytsearch3:"<query> hd".
+- Downloads 30-60s and extracts the peak motion 3-5s snippet using OpenCV frame differencing.
+- For still images: OpenCV Saliency/contrast analysis finds the visual focal point (nx, ny)
+  and applies continuous targeted Ken-Burns zoom (1.0x -> 1.15x).
+- Manual override: Checks input/broll/ first if user dropped custom clips.
+- Fallback: Procedural dynamic motion plate.
 """
 
 import hashlib
 import logging
 import os
+import re
 import subprocess
-import urllib.parse
+import time
 from pathlib import Path
 from typing import Any
 
-import requests
-from dotenv import load_dotenv
+import cv2
+import numpy as np
 
 from .selector import ClipProposal, SceneCut
 
-load_dotenv()
 logger = logging.getLogger("uncensored_talking.broll")
 
 
 def sanitize_query(query: str) -> str:
-    """Cleans up search query string."""
-    return query.strip().replace('"', "").replace("'", "")
+    clean = re.sub(r'[\\/*?:"<>|]', "", query)
+    return clean.strip().replace("'", "").replace('"', "")
 
 
-def download_file(url: str, dest_path: Path, timeout: int = 15) -> Path:
-    """Downloads a file from a URL to local disk."""
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) UncensoredTalkingBot/2.0"
-    }
-    with requests.get(url, headers=headers, stream=True, timeout=timeout) as response:
-        response.raise_for_status()
-        with open(dest_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=65536):
-                if chunk:
-                    f.write(chunk)
-    return dest_path
+def check_manual_broll_drop(query: str, broll_dir: Path = Path("input/broll")) -> Path | None:
+    """Checks input/broll/ for files matching query keywords or any dropped media."""
+    if not broll_dir.exists():
+        return None
 
-
-def search_pexels(
-    query: str,
-    api_key: str,
-) -> tuple[str | None, str]:
-    """
-    Searches Pexels for videos or high-resolution images.
-    Returns: (url, 'video' | 'image' | None)
-    """
-    headers = {"Authorization": api_key}
-    clean_q = urllib.parse.quote(sanitize_query(query))
-
-    # 1. Try Pexels Video Search (portrait preferred)
-    try:
-        v_url = f"https://api.pexels.com/videos/search?query={clean_q}&per_page=5&orientation=portrait"
-        res = requests.get(v_url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            videos = data.get("videos", [])
-            for vid in videos:
-                for file_info in vid.get("video_files", []):
-                    # Prefer HD portrait MP4
-                    if file_info.get("file_type") == "video/mp4" and file_info.get("width", 0) >= 720:
-                        return file_info["link"], "video"
-            # Fallback to any orientation
-            if videos:
-                first_files = videos[0].get("video_files", [])
-                if first_files:
-                    return first_files[0]["link"], "video"
-    except Exception as exc:
-        logger.debug(f"Pexels video search error: {exc}")
-
-    # 2. Try Pexels Photo Search
-    try:
-        p_url = f"https://api.pexels.com/v1/search?query={clean_q}&per_page=5"
-        res = requests.get(p_url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            photos = data.get("photos", [])
-            if photos:
-                # Use large or original
-                src = photos[0].get("src", {})
-                img_url = src.get("large2x") or src.get("large") or src.get("original")
-                if img_url:
-                    return img_url, "image"
-    except Exception as exc:
-        logger.debug(f"Pexels photo search error: {exc}")
-
-    return None, ""
-
-
-def search_pixabay(
-    query: str,
-    api_key: str,
-) -> tuple[str | None, str]:
-    """
-    Searches Pixabay for videos or high-resolution photos.
-    """
-    clean_q = urllib.parse.quote(sanitize_query(query))
-
-    # 1. Video search
-    try:
-        v_url = f"https://pixabay.com/api/videos/?key={api_key}&q={clean_q}&per_page=5"
-        res = requests.get(v_url, timeout=8)
-        if res.status_code == 200:
-            hits = res.json().get("hits", [])
-            for hit in hits:
-                vids = hit.get("videos", {})
-                # Try large or medium
-                choice = vids.get("large") or vids.get("medium") or vids.get("small")
-                if choice and choice.get("url"):
-                    return choice["url"], "video"
-    except Exception as exc:
-        logger.debug(f"Pixabay video search error: {exc}")
-
-    # 2. Image search
-    try:
-        p_url = f"https://pixabay.com/api/?key={api_key}&q={clean_q}&per_page=5&image_type=photo"
-        res = requests.get(p_url, timeout=8)
-        if res.status_code == 200:
-            hits = res.json().get("hits", [])
-            if hits:
-                img_url = hits[0].get("largeImageURL") or hits[0].get("webformatURL")
-                if img_url:
-                    return img_url, "image"
-    except Exception as exc:
-        logger.debug(f"Pixabay image search error: {exc}")
-
-    return None, ""
-
-
-def search_wikimedia_public(query: str) -> tuple[str | None, str]:
-    """
-    Public CC0 / royalty-free image search using Wikimedia Commons API.
-    """
-    clean_q = urllib.parse.quote(sanitize_query(query))
-    url = (
-        f"https://commons.wikimedia.org/w/api.php?action=query&generator=search"
-        f"&gsrsearch={clean_q}&gsrnamespace=6&gsrlimit=5&prop=imageinfo"
-        f"&iiprop=url|mime&format=json"
-    )
-    headers = {"User-Agent": "UncensoredTalkingBot/2.0 (research automation)"}
-    try:
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            pages = data.get("query", {}).get("pages", {})
-            for page in pages.values():
-                infos = page.get("imageinfo", [])
-                for info in infos:
-                    mime = info.get("mime", "")
-                    img_url = info.get("url")
-                    if img_url and ("image/jpeg" in mime or "image/png" in mime or "image/webp" in mime):
-                        return img_url, "image"
-    except Exception as exc:
-        logger.debug(f"Wikimedia search error: {exc}")
-
-    return None, ""
-
-
-def generate_cinematic_fallback(
-    output_path: Path,
-    duration: float,
-    width: int,
-    height: int,
-    query_seed: str,
-) -> Path:
-    """
-    Generates a cinematic motion visual texture using FFmpeg filters
-    when no external API or internet access is available.
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    # Generate abstract dynamic motion plate (gradient + moving geometric patterns)
-    hue_val = (hash(query_seed) % 360)
-    filter_expr = (
-        f"color=c=black:s={width}x{height}:d={duration},"
-        f"geq=r='128+100*sin(X/80+T*2)':g='80+60*cos(Y/60+T*1.5)':b='180+50*sin((X+Y)/100+T)',"
-        f"boxblur=20:1,"
-        f"hue=h={hue_val}:s=1.2"
-    )
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi", "-i", filter_expr,
-        "-t", str(duration),
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-pix_fmt", "yuv420p",
-        str(output_path),
+    files = [
+        f for f in broll_dir.iterdir()
+        if f.is_file() and not f.name.startswith(".") and f.suffix.lower() in [".mp4", ".mov", ".mkv", ".jpg", ".png", ".webp"]
     ]
+    if not files:
+        return None
 
+    # Check keyword match
+    keywords = set(query.lower().split())
+    for f in files:
+        f_name_words = set(re.sub(r"[^\w]", " ", f.stem.lower()).split())
+        if keywords.intersection(f_name_words):
+            logger.info(f"Using manual user-provided B-roll match: {f.name}")
+            return f
+
+    # If only one file exists in input/broll, use it
+    logger.info(f"Using manual user-provided B-roll from input/broll: {files[0].name}")
+    return files[0]
+
+
+def find_visual_focal_point(image_path: Path | str) -> tuple[float, float]:
+    """
+    Computes visual saliency / contrast map via OpenCV Laplacian & Gaussian blur.
+    Returns normalized coordinates (nx, ny) in range [0.1, 0.9] of the primary focal point.
+    """
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except Exception:
-        # Fallback to simple solid color motion
-        simple_cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=0x111122:s={width}x{height}:d={duration}",
-            "-t", str(duration),
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-pix_fmt", "yuv420p",
-            str(output_path),
-        ]
-        subprocess.run(simple_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        img = cv2.imread(str(image_path))
+        if img is None:
+            return 0.5, 0.5
 
-    return output_path
+        h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Contrast map via Laplacian gradient
+        lap = cv2.Laplacian(gray, cv2.CV_64F)
+        contrast = np.abs(lap)
+
+        # Smooth to detect largest prominent feature area
+        ksize = min(99, max(21, (min(h, w) // 10) | 1))
+        blurred = cv2.GaussianBlur(contrast, (ksize, ksize), 0)
+
+        _, _, _, max_loc = cv2.minMaxLoc(blurred)
+        nx = max_loc[0] / float(w)
+        ny = max_loc[1] / float(h)
+
+        # Clamp safely away from extreme edges for smooth zoom bounds
+        return max(0.15, min(0.85, nx)), max(0.15, min(0.85, ny))
+    except Exception as exc:
+        logger.debug(f"Saliency focal point detection fallback: {exc}")
+        return 0.5, 0.5
 
 
-def apply_ken_burns_effect(
-    image_path: Path,
+def extract_peak_motion_snippet(
+    video_path: Path,
     output_path: Path,
-    duration: float,
-    width: int = 1080,
-    height: int = 1920,
-    fps: int = 30,
+    target_duration: float = 4.0,
+    target_width: int = 1080,
+    target_height: int = 1920,
 ) -> Path:
     """
-    Applies a smooth Ken-Burns effect (continuous zoom 1.0x -> 1.15x) on a static image
-    and renders it into an MP4 clip.
+    Analyzes frame-by-frame motion using OpenCV absdiff.
+    Finds the 3-5s time window with MAXIMUM visual action/motion and cuts it out
+    with proportional scaling (scale=-1:target_height, crop=target_width:target_height).
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    total_frames = int(duration * fps) + 5
-    zoom_step = 0.15 / max(1, total_frames)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video for motion analysis: {video_path}")
 
-    # FFmpeg zoompan filter:
-    # zoom starts at 1.0 and grows up to 1.15
-    filter_str = (
-        f"zoompan=z='min(zoom+{zoom_step:.6f},1.15)':"
-        f"d={total_frames}:"
-        f"s={width}x{height}:"
-        f"fps={fps}"
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    window_frames = max(1, int(target_duration * fps))
+
+    motion_scores: list[tuple[int, float]] = []
+    prev_gray = None
+
+    # Sample up to first 60 seconds (max 1800 frames)
+    max_scan_frames = min(total_frames, int(60 * fps)) if total_frames > 0 else int(60 * fps)
+    sample_step = 3  # sample every 3rd frame for ultra-fast motion estimation
+
+    frame_idx = 0
+    while frame_idx < max_scan_frames:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+
+        if frame_idx % sample_step == 0:
+            small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_LINEAR)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+            if prev_gray is not None:
+                diff = cv2.absdiff(gray, prev_gray)
+                score = float(np.mean(diff))
+                motion_scores.append((frame_idx, score))
+            prev_gray = gray
+
+        frame_idx += 1
+
+    cap.release()
+
+    # Find window with highest average motion
+    best_start_sec = 0.0
+    if len(motion_scores) > window_frames // sample_step:
+        window_size = window_frames // sample_step
+        scores_arr = [s[1] for s in motion_scores]
+        rolling_sums = np.convolve(scores_arr, np.ones(window_size), mode="valid")
+        best_idx = int(np.argmax(rolling_sums))
+        best_frame = motion_scores[best_idx][0]
+        best_start_sec = max(0.0, best_frame / fps)
+
+    logger.info(
+        f"Selected peak-motion action window at {best_start_sec:.2f}s (duration: {target_duration:.1f}s) "
+        f"for {output_path.name}"
+    )
+
+    # Cut with proportional scaling (NEVER stretch)
+    vf = (
+        f"scale=-1:{target_height}:flags=lanczos,"
+        f"crop={target_width}:{target_height}:(in_w-{target_width})/2:0,"
+        f"setsar=1,fps=30"
     )
 
     cmd = [
         "ffmpeg", "-y",
-        "-loop", "1",
-        "-i", str(image_path),
-        "-vf", filter_str,
-        "-t", str(duration),
+        "-ss", f"{best_start_sec:.3f}",
+        "-t", f"{target_duration:.3f}",
+        "-i", str(video_path),
+        "-vf", vf,
         "-c:v", "libx264",
         "-preset", "fast",
+        "-an",
         "-pix_fmt", "yuv420p",
         str(output_path),
     ]
@@ -253,29 +175,38 @@ def apply_ken_burns_effect(
     return output_path
 
 
-def process_broll_video(
-    video_path: Path,
+def apply_focal_ken_burns(
+    image_path: Path,
     output_path: Path,
     duration: float,
-    width: int = 1080,
-    height: int = 1920,
+    target_width: int,
+    target_height: int,
+    fps: int = 30,
 ) -> Path:
     """
-    Crops, centers, scales, and trims/loops a B-Roll video to the exact target dimensions and duration.
+    Applies continuous Ken-Burns zoom (1.0x -> 1.15x) targeted at visual focal point (nx, ny).
+    Proportionally scales to target_width x target_height.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # Center crop and scale to width:height, loop if shorter than duration
-    filter_str = (
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},"
-        f"setsar=1"
+    nx, ny = find_visual_focal_point(image_path)
+    total_frames = int(duration * fps) + 5
+    zoom_step = 0.15 / max(1, total_frames)
+
+    # Zoom centered around focal point (nx, ny)
+    filter_expr = (
+        f"zoompan=z='min(zoom+{zoom_step:.6f},1.15)':"
+        f"x='(iw-iw/zoom)*{nx:.3f}':"
+        f"y='(ih-ih/zoom)*{ny:.3f}':"
+        f"d={total_frames}:"
+        f"s={target_width}x{target_height}:"
+        f"fps={fps}"
     )
 
     cmd = [
         "ffmpeg", "-y",
-        "-stream_loop", "3",
-        "-i", str(video_path),
-        "-vf", filter_str,
+        "-loop", "1",
+        "-i", str(image_path),
+        "-vf", filter_expr,
         "-t", str(duration),
         "-c:v", "libx264",
         "-preset", "fast",
@@ -288,77 +219,93 @@ def process_broll_video(
     return output_path
 
 
-def fetch_broll_asset(
+def download_youtube_broll(
     query: str,
-    duration: float,
-    target_width: int,
-    target_height: int,
+    output_video_path: Path,
+    max_duration: int = 45,
+) -> Path | None:
+    """
+    Searches YouTube for real footage using yt-dlp: ytsearch3:"<query> hd" --max-downloads 1.
+    Downloads first 30-45s of the best matching real footage.
+    """
+    output_video_path.parent.mkdir(parents=True, exist_ok=True)
+    search_term = f"ytsearch3:{sanitize_query(query)} hd"
+
+    ydl_opts = {
+        "format": "bestvideo[height<=720][protocol^=http][ext=mp4]+bestaudio/best[height<=720][ext=mp4]/best",
+        "outtmpl": str(output_video_path.with_suffix("")),
+        "merge_output_format": "mp4",
+        "nocheckcertificate": True,
+        "max_downloads": 1,
+        "quiet": True,
+        "no_warnings": True,
+    }
+
+    try:
+        import yt_dlp
+
+        logger.info(f"Searching real footage via YouTube: '{query}'...")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([search_term])
+
+        if output_video_path.exists() and output_video_path.stat().st_size > 50000:
+            return output_video_path
+
+        # Find any matching file written by yt-dlp
+        matches = list(output_video_path.parent.glob(f"{output_video_path.stem}.*"))
+        if matches and matches[0].stat().st_size > 50000:
+            return matches[0]
+    except Exception as exc:
+        logger.warning(f"YouTube real footage search failed for '{query}': {exc}")
+
+    return None
+
+
+def generate_cinematic_fallback(
     output_path: Path,
+    duration: float,
+    width: int,
+    height: int,
+    query: str,
 ) -> Path:
-    """
-    Orchestrates finding, downloading, and motion-processing of a B-Roll asset for a given query.
-    """
+    """Procedural dynamic motion texture when all external sources are unavailable."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.exists() and output_path.stat().st_size > 5000:
-        return output_path
+    seed = abs(hash(query)) % 360
 
-    pexels_key = os.getenv("PEXELS_API_KEY")
-    pixabay_key = os.getenv("PIXABAY_API_KEY")
-
-    asset_url: str | None = None
-    asset_type: str = ""
-
-    # 1. Try Pexels
-    if pexels_key:
-        asset_url, asset_type = search_pexels(query, pexels_key)
-
-    # 2. Try Pixabay
-    if not asset_url and pixabay_key:
-        asset_url, asset_type = search_pixabay(query, pixabay_key)
-
-    # 3. Try Wikimedia Commons
-    if not asset_url:
-        asset_url, asset_type = search_wikimedia_public(query)
-
-    # 4. If asset found, download and process
-    if asset_url:
-        try:
-            h = hashlib.md5(asset_url.encode()).hexdigest()[:10]
-            ext = ".mp4" if asset_type == "video" else ".jpg"
-            raw_download = output_path.parent / f"raw_{h}{ext}"
-
-            if not raw_download.exists():
-                logger.info(f"Downloading B-Roll ({asset_type}) for query '{query}' from {asset_url[:50]}...")
-                download_file(asset_url, raw_download)
-
-            if asset_type == "video":
-                return process_broll_video(
-                    video_path=raw_download,
-                    output_path=output_path,
-                    duration=duration,
-                    width=target_width,
-                    height=target_height,
-                )
-            else:
-                return apply_ken_burns_effect(
-                    image_path=raw_download,
-                    output_path=output_path,
-                    duration=duration,
-                    width=target_width,
-                    height=target_height,
-                )
-        except Exception as exc:
-            logger.warning(f"Error processing downloaded B-Roll for '{query}': {exc}. Using cinematic fallback.")
-
-    # 5. Fallback generator
-    logger.info(f"Generating cinematic motion plate for query '{query}' ({duration:.1f}s)...")
-    return generate_cinematic_fallback(
-        output_path=output_path,
-        duration=duration,
-        width=target_width,
-        height=target_height,
-        query_seed=query,
+    filter_expr = (
+        f"color=c=black:s={width}x{height}:d={duration},"
+        f"geq=r='120+90*sin(X/90+T*2)':g='60+50*cos(Y/70+T*1.8)':b='180+60*sin((X+Y)/120+T)',"
+        f"boxblur=15:1,"
+        f"hue=h={seed}:s=1.3"
     )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", filter_expr,
+        "-t", str(duration),
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-an",
+        "-pix_fmt", "yuv420p",
+        str(output_path),
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception:
+        cmd_fallback = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=c=0x1a1a2e:s={width}x{height}:d={duration}",
+            "-t", str(duration),
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-an",
+            "-pix_fmt", "yuv420p",
+            str(output_path),
+        ]
+        subprocess.run(cmd_fallback, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    return output_path
 
 
 def source_broll_for_clip(
@@ -366,33 +313,84 @@ def source_broll_for_clip(
     temp_dir: Path | str = Path("temp"),
 ) -> list[SceneCut]:
     """
-    Iterates over all scenes in a clip. For every scene requiring B-Roll
-    ('full_broll' or 'splitscreen'), fetches or generates the visual asset.
+    Sourcing pipeline for each SceneCut in a ClipProposal:
+    1. Check manual user drop in input/broll/
+    2. Search YouTube real footage via ytsearch3:"<query> hd"
+    3. Extract highest motion snippet (3-5s) with OpenCV
+    4. For images: Saliency focal point Ken-Burns
+    5. Fallback: Prompt or dynamic motion plate
     """
     temp_dir = Path(temp_dir)
-    broll_dir = temp_dir / "broll" / f"clip_{clip.clip_id}"
-    broll_dir.mkdir(parents=True, exist_ok=True)
+    broll_cache = temp_dir / "broll" / f"clip_{clip.clip_id}"
+    broll_cache.mkdir(parents=True, exist_ok=True)
 
     for idx, scene in enumerate(clip.scenes, start=1):
-        if scene.layout in ("full_broll", "splitscreen"):
-            # Target resolution:
-            # full_broll: 1080x1920
-            # splitscreen: top half is 1080x960
-            if scene.layout == "splitscreen":
-                w, h = 1080, 960
+        if scene.layout not in ("full_broll", "splitscreen"):
+            continue
+
+        target_w = 1080
+        target_h = 960 if scene.layout == "splitscreen" else 1920
+
+        query = scene.search_query or "cinematic dramatic scene"
+        slug = sanitize_query(query).replace(" ", "_")[:25] or "scene"
+        final_plate = broll_cache / f"scene_{idx}_{slug}.mp4"
+
+        if final_plate.exists() and final_plate.stat().st_size > 5000:
+            scene.broll_asset_path = str(final_plate.resolve())
+            continue
+
+        # 1. Check manual drop in input/broll
+        manual_asset = check_manual_broll_drop(query)
+        if manual_asset:
+            if manual_asset.suffix.lower() in [".jpg", ".png", ".webp"]:
+                apply_focal_ken_burns(
+                    image_path=manual_asset,
+                    output_path=final_plate,
+                    duration=scene.duration,
+                    target_width=target_w,
+                    target_height=target_h,
+                )
             else:
-                w, h = 1080, 1920
+                extract_peak_motion_snippet(
+                    video_path=manual_asset,
+                    output_path=final_plate,
+                    target_duration=scene.duration,
+                    target_width=target_w,
+                    target_height=target_h,
+                )
+            scene.broll_asset_path = str(final_plate.resolve())
+            continue
 
-            clean_slug = sanitize_query(scene.search_query).replace(" ", "_")[:30] or "scene"
-            dest_file = broll_dir / f"scene_{idx}_{clean_slug}.mp4"
+        # 2. Search YouTube real footage
+        h_query = hashlib.md5(query.encode()).hexdigest()[:8]
+        raw_yt_video = broll_cache / f"raw_yt_{h_query}.mp4"
 
-            broll_path = fetch_broll_asset(
-                query=scene.search_query or "cinematic dramatic lighting",
-                duration=scene.duration,
-                target_width=w,
-                target_height=h,
-                output_path=dest_file,
-            )
-            scene.broll_asset_path = str(broll_path.resolve())
+        if not raw_yt_video.exists():
+            download_youtube_broll(query=query, output_video_path=raw_yt_video)
+
+        if raw_yt_video.exists() and raw_yt_video.stat().st_size > 50000:
+            try:
+                extract_peak_motion_snippet(
+                    video_path=raw_yt_video,
+                    output_path=final_plate,
+                    target_duration=scene.duration,
+                    target_width=target_w,
+                    target_height=target_h,
+                )
+                scene.broll_asset_path = str(final_plate.resolve())
+                continue
+            except Exception as exc:
+                logger.warning(f"Error extracting motion snippet from '{raw_yt_video}': {exc}")
+
+        # 3. Fallback: Dynamic motion texture
+        logger.info(f"Generating fallback motion texture for '{query}'...")
+        generate_cinematic_fallback(
+            output_path=final_plate,
+            duration=scene.duration,
+            width=target_w,
+            height=target_h,
+            query=query,
+        )
+        scene.broll_asset_path = str(final_plate.resolve())
 
     return clip.scenes
