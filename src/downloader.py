@@ -92,6 +92,35 @@ def download_youtube_video(
             if matched:
                 target_path = matched[0]
 
+        # Extract and save timed json3 captions if available
+        if info:
+            auto_subs = info.get("automatic_captions", {}) or info.get("subtitles", {})
+            for lang in ["en", "de"]:
+                if lang in auto_subs:
+                    for fmt in auto_subs[lang]:
+                        if fmt.get("ext") == "json3" and fmt.get("url"):
+                            try:
+                                import ssl
+                                import urllib.request
+
+                                ctx = ssl.create_default_context()
+                                ctx.check_hostname = False
+                                ctx.verify_mode = ssl.CERT_NONE
+                                req = urllib.request.Request(fmt["url"], headers={"User-Agent": "Mozilla/5.0"})
+                                with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+                                    sub_data = resp.read()
+                                if sub_data:
+                                    temp_sub = Path("temp") / f"yt_subs.{lang}.json3"
+                                    temp_sub.parent.mkdir(parents=True, exist_ok=True)
+                                    with open(temp_sub, "wb") as f:
+                                        f.write(sub_data)
+                                    logger.info(f"Saved direct YouTube {lang} json3 captions to {temp_sub}")
+                                    break
+                            except Exception as sub_err:
+                                logger.debug(f"Direct caption fetch failed for {lang}: {sub_err}")
+                    if (Path("temp") / f"yt_subs.{lang}.json3").exists():
+                        break
+
         return target_path
     except Exception as exc:
         logger.error(f"yt-dlp download failed for URL '{url}': {exc}")
