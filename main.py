@@ -19,6 +19,7 @@ Pipeline:
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -30,11 +31,16 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Import pipeline modules
 from src.downloader import download_youtube_video
 from src.audio import extract_audio
 from src.transcribe import transcribe_audio
-from src.selector import select_viral_clips
+from src.selector import (
+    select_viral_clips,
+    discover_stories,
+    plan_story_script_and_broll,
+    format_storyboard_display,
+    DiscoveredStory,
+)
 from src.broll_engine import source_broll_for_clip
 from src.subtitles import generate_png_subtitles
 from src.video import render_clip, check_nvenc_support
@@ -187,6 +193,22 @@ def main() -> None:
         help="Disable background music mixing in output shorts.",
     )
     parser.add_argument(
+        "--story",
+        type=int,
+        default=None,
+        help="Directly select a specific story number (skips interactive selection prompt).",
+    )
+    parser.add_argument(
+        "--confirm-storyboard",
+        action="store_true",
+        help="Automatically confirm storyboard without interactive (y/anpassen/n) prompt.",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Batch mode: process all discovered stories or default top stories non-interactively.",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose debug logging.",
@@ -239,89 +261,187 @@ def main() -> None:
     )
 
     # =========================================================================
-    # STEP 3: Non-Linear Hook & Visual Direction Planning
+    # PHASE 1: Story Discovery (Terminal-Ausgabe & Pause)
     # =========================================================================
-    print("\n" + "=" * 60)
-    print(f">>> STEP 3: Non-Linear Hook Curation & 2-5s Visual Scene Timeline")
-    print("=" * 60)
+    print("\n" + "=" * 64)
+    print(">>> PHASE 1: STORY DISCOVERY (Analyse des gesamten Rohtranskripts)")
+    print("=" * 64)
     prefer_llm = not args.offline
-    clip_proposals = select_viral_clips(
+    discovered_stories = discover_stories(
         transcript_file=transcript_txt,
         word_timestamps_file=word_timestamps_json,
-        num_clips=args.clips,
         prefer_llm=prefer_llm,
-        output_json_path=temp_dir / "selected_clips.json",
     )
 
-    if not clip_proposals:
-        logger.error("No valid clip proposals were generated. Aborting.")
+    if not discovered_stories:
+        logger.error("Keine Stories im Transkript gefunden. Beende.")
         sys.exit(1)
 
-    print(f"\nIdentified {len(clip_proposals)} explosive non-linear clips:")
-    for cp in clip_proposals:
-        print(f"  • [Clip {cp.clip_id}] '{cp.title}' ({cp.total_duration:.1f}s)")
-        print(f"    Hook (first 3-5s): \"{cp.hook[:75]}...\"")
-        print(f"    Segments: {len(cp.segments)} (Non-linear cuts)")
-        print(f"    Scenes ({len(cp.scenes)}): " + ", ".join(f"{sc.layout} ({sc.duration:.1f}s)" for sc in cp.scenes[:4]) + "...")
-
-    # =========================================================================
-    # STEP 4: Real-Footage YouTube Sourcing & Peak Motion Extraction
-    # =========================================================================
-    print("\n" + "=" * 60)
-    print(">>> STEP 4: Sourcing Real B-Roll Footage & Focal-Point Ken-Burns")
-    print("=" * 60)
-    for cp in clip_proposals:
-        print(f"Sourcing real B-roll footage for Clip {cp.clip_id}: '{cp.title}'...")
-        source_broll_for_clip(cp, temp_dir=temp_dir)
-
-    # =========================================================================
-    # STEP 5 & 6: Gradient Subtitles & Anti-Stretch Video Rendering
-    # =========================================================================
-    print("\n" + "=" * 60)
-    print(">>> STEP 5 & 6: Rendering Shorts (Pillow Gradient Subs & Proportional Face Tracking)")
-    print("=" * 60)
+    with open(word_timestamps_json, "r", encoding="utf-8") as f:
+        all_words = json.load(f)
 
     rendered_clips: list[Path] = []
-    for cp in clip_proposals:
-        print(f"\nRendering Short {cp.clip_id}/{len(clip_proposals)}: '{cp.title}'")
 
-        # 5. Generate Transparent PNG Subtitle Sequence with Vertical Gradient
-        sub_dir = temp_dir / "subtitles" / f"clip_{cp.clip_id}"
-        concat_subs_file, _ = generate_png_subtitles(
-            clip=cp,
-            word_timestamps_file=word_timestamps_json,
-            output_dir=sub_dir,
+    # Interactive Human-in-the-Loop Loop
+    while True:
+        print("\nGefundene Micro-Stories im Rohtranskript:")
+        print("-" * 64)
+        for st in discovered_stories:
+            print(st.to_terminal_display())
+            print()
+        print("-" * 64)
+
+        if args.story is not None:
+            chosen_id = args.story
+            print(f"[CLI-Flag] Wähle Story [{chosen_id}] direkt aus.")
+        elif args.batch:
+            print("[Batch-Modus] Verarbeite alle Stories nacheinander.")
+            chosen_id = None
+        else:
+            try:
+                choice = input("Wähle eine Story-Nummer zum Schneiden (oder 'q' zum Beenden): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nPipeline durch Benutzer abgebrochen.")
+                break
+
+            if choice.lower() in ("q", "quit", "exit"):
+                print("Pipeline beendet. Bis zum nächsten Mal!")
+                break
+
+            if not choice.isdigit():
+                print("Ungültige Eingabe. Bitte eine Zahl oder 'q' eingeben.")
+                continue
+
+            chosen_id = int(choice)
+
+        selected_stories = (
+            discovered_stories if (args.batch and args.story is None)
+            else [s for s in discovered_stories if s.story_id == chosen_id]
         )
 
-        # 6. Render video clip with proportional anti-stretch scaling, smoothed face tracking & background music
-        encoder_choice = None if args.encoder == "auto" else args.encoder
-        bg_music = None if args.no_bg_music else args.bg_music
-        out_clip = render_clip(
-            source_video_path=input_video,
-            clip=cp,
-            subtitles_source=concat_subs_file,
-            output_dir=output_dir,
-            force_encoder=encoder_choice,
-            overwrite=True,
-            bg_music_path=bg_music,
-            bg_music_volume=args.bg_music_volume,
-        )
-        rendered_clips.append(out_clip)
+        if not selected_stories:
+            print(f"Story mit Nummer {chosen_id} nicht gefunden. Bitte erneut wählen.")
+            if args.story is not None:
+                break
+            continue
+
+        for story in selected_stories:
+            # =================================================================
+            # PHASE 2: Radikaler Story-Schnitt & B-Roll-Planung
+            # =================================================================
+            print(f"\nPlane radikalen Schnitt (30-60s) und B-Roll für Story [{story.story_id}]...")
+            feedback_text = None
+            proposal = plan_story_script_and_broll(
+                story=story,
+                words=all_words,
+                prefer_llm=prefer_llm,
+                feedback=feedback_text,
+            )
+
+            # Storyboard Confirmation Loop
+            confirmed = False
+            while True:
+                print(format_storyboard_display(proposal, story))
+
+                if args.confirm_storyboard or args.batch:
+                    print("[Auto-Confirm] Storyboard automatisch bestätigt.")
+                    confirmed = True
+                    break
+
+                try:
+                    conf_input = input("\nStoryboard bestätigen? (y / anpassen / n): ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    conf_input = "n"
+
+                if conf_input in ("y", "yes", "ja"):
+                    confirmed = True
+                    break
+                elif conf_input in ("n", "no", "nein"):
+                    print("Storyboard verworfen. Zurück zur Story-Auswahl...")
+                    confirmed = False
+                    break
+                elif conf_input in ("anpassen", "adjust", "edit", "a"):
+                    try:
+                        feedback_text = input("Was möchtest du anpassen? (z.B. anderer Hook, B-Roll-Änderung): ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        feedback_text = None
+                    print("\nPasse Storyboard basierend auf Feedback an...")
+                    proposal = plan_story_script_and_broll(
+                        story=story,
+                        words=all_words,
+                        prefer_llm=prefer_llm,
+                        feedback=feedback_text,
+                    )
+                else:
+                    print("Ungültige Eingabe. Bitte 'y', 'anpassen' oder 'n' eingeben.")
+
+            if not confirmed or proposal is None:
+                continue
+
+            # =================================================================
+            # PHASE 3: Asset-Sourcing & Render
+            # =================================================================
+            print("\n" + "=" * 64)
+            print(f">>> PHASE 3: ASSET-SOURCING & RENDERING (Story {story.story_id})")
+            print("=" * 64)
+            print("Sourcing B-Roll Footage mit strikter Deduplizierung...")
+            source_broll_for_clip(proposal, temp_dir=temp_dir, word_timestamps_file=word_timestamps_json)
+
+            sub_dir = temp_dir / "subtitles" / f"story_{story.story_id}"
+            concat_subs_file, _ = generate_png_subtitles(
+                clip=proposal,
+                word_timestamps_file=word_timestamps_json,
+                output_dir=sub_dir,
+            )
+
+            encoder_choice = None if args.encoder == "auto" else args.encoder
+            bg_music = None if args.no_bg_music else args.bg_music
+            out_clip = render_clip(
+                source_video_path=input_video,
+                clip=proposal,
+                subtitles_source=concat_subs_file,
+                output_dir=output_dir,
+                force_encoder=encoder_choice,
+                overwrite=True,
+                bg_music_path=bg_music,
+                bg_music_volume=args.bg_music_volume,
+                output_filename=f"story_{story.story_id}.mp4",
+            )
+            rendered_clips.append(out_clip)
+            size_mb = out_clip.stat().st_size / (1024 * 1024)
+            print("\n" + "=" * 64)
+            print(f"  Short erfolgreich gerendert: {out_clip.relative_to(Path.cwd())} ({size_mb:.2f} MB)")
+            print("=" * 64)
+
+        if args.story is not None or args.batch:
+            break
+
+        try:
+            another = input("\nMöchtest du eine weitere Story schneiden? (y / n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            another = "n"
+
+        if another not in ("y", "yes", "ja"):
+            print("Pipeline beendet. Bis zum nächsten Mal!")
+            break
 
     total_elapsed = time.time() - start_total_time
 
     # =========================================================================
     # SUMMARY
     # =========================================================================
-    print("\n" + "=" * 60)
-    print("                 PIPELINE COMPLETE! 🚀")
-    print("=" * 60)
+    print("\n" + "=" * 64)
+    print("                 PIPELINE RUN COMPLETE! 🚀")
+    print("=" * 64)
     print(f"Total processing time: {total_elapsed:.1f} seconds")
-    print(f"Generated {len(rendered_clips)} dynamic layout shorts for @uncensored_talking:")
-    for clip_path in rendered_clips:
-        size_mb = clip_path.stat().st_size / (1024 * 1024)
-        print(f"  -> {clip_path.relative_to(Path.cwd())} ({size_mb:.2f} MB)")
-    print("=" * 60 + "\n")
+    if rendered_clips:
+        print(f"Gerenderte Shorts in 'output/':")
+        for clip_path in rendered_clips:
+            size_mb = clip_path.stat().st_size / (1024 * 1024)
+            print(f"  -> {clip_path.relative_to(Path.cwd())} ({size_mb:.2f} MB)")
+    else:
+        print("Keine neuen Videos gerendert.")
+    print("=" * 64 + "\n")
 
 
 if __name__ == "__main__":

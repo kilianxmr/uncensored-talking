@@ -112,6 +112,29 @@ class ClipProposal(BaseModel):
         }
 
 
+class DiscoveredStory(BaseModel):
+    story_id: int
+    summary: str = Field(..., description="1-2 sentences in German summarizing what it's about and how it ends")
+    hook: str = Field(..., description="Exact shocking opening sentence from the transcript")
+    start_sec: float = Field(..., description="Start timestamp in seconds in raw transcript")
+    end_sec: float = Field(..., description="End timestamp in seconds in raw transcript")
+
+    @property
+    def time_range_str(self) -> str:
+        s_min = int(self.start_sec // 60)
+        s_sec = int(self.start_sec % 60)
+        e_min = int(self.end_sec // 60)
+        e_sec = int(self.end_sec % 60)
+        return f"Min {s_min}:{s_sec:02d} - Min {e_min}:{e_sec:02d}"
+
+    def to_terminal_display(self) -> str:
+        return (
+            f"Story [{self.story_id}]: {self.summary}\n"
+            f'Hook: "{self.hook}"\n'
+            f"Original-Zeitbereich: {self.time_range_str}"
+        )
+
+
 UNCENSORED_SYSTEM_PROMPT = """You are the Lead Visual Director and Executive Editor for the viral channel "@uncensored_talking".
 Your mission:
 Create explosive, highly shareable 30-60 second vertical shorts from podcast/interview transcripts using NON-LINEAR EDITING.
@@ -832,3 +855,497 @@ def select_viral_clips(
         json.dump([p.to_output_dict() for p in proposals], f, indent=2, ensure_ascii=False)
 
     return proposals
+
+
+STORY_DISCOVERY_SYSTEM_PROMPT = """You are the Lead Story Scout for the viral channel "@uncensored_talking".
+Analyze the entire raw transcript of this conversation.
+MISSION:
+Find ALL genuine micro-stories, anecdotes, revelations, debates, or confessions in this conversation.
+CRITICAL RULE: DO NOT force a fixed number! Find all authentic stories (whether that is 2, 5, 8, or 15).
+
+For every discovered story, provide:
+1. "story_id": Sequential integer (1, 2, 3...)
+2. "summary": Exactly 1-2 German sentences summarizing what the story is about, the key conflict, and how it turns out.
+3. "hook": The exact, shocking opening sentence taken verbatim from the transcript.
+4. "start_sec": Timestamp in seconds where the discussion / question on this topic begins.
+5. "end_sec": Timestamp in seconds where the discussion on this topic concludes.
+
+OUTPUT SCHEMA (Return ONLY valid JSON):
+[
+  {
+    "story_id": 1,
+    "summary": "Terry berichtet über massive Schmiergelder von Pharma-Lobbyisten und enthüllt, wie Gesetze gezielt gekauft wurden.",
+    "hook": "Wait, so you're saying Terry is taking money directly from them?",
+    "start_sec": 735.0,
+    "end_sec": 1120.0
+  }
+]
+"""
+
+STORY_PLANNING_SYSTEM_PROMPT = """You are the Executive Editor and Visual Director for "@uncensored_talking".
+You are handed a specific micro-story from a podcast interview.
+Your task is to craft a hyper-condensed, viral 30 to 60 second vertical Short script with a high-retention visual B-roll plan.
+
+1. RADICAL CONDENSATION (Eliminate Fluff):
+   - Cut out ALL filler words ("um", "uh", "you know", "like"), stuttering, awkward pauses, and rambling introductory remarks.
+   - Assemble sentences non-linearly:
+     * Hook (0-3s): The most shocking, controversial, or provocative sentence.
+     * Proof / Argument (4-40s): Fast-paced, punchy factual narrative.
+     * Climax / Payoff (40-60s): The jaw-dropping revelation or punchline.
+   - TOTAL DURATION MUST BE STRICTLY 30 TO 60 SECONDS!
+
+2. VISUAL B-ROLL PLAN (High-Energy Retention):
+   - A visual change or cut EVERY 2 TO 4 SECONDS (never leave a single angle longer than 4s).
+   - Layouts:
+     * 'splitscreen': 1080x960 B-roll on top, 1080x960 speaker on bottom.
+     * 'full_broll': 1080x1920 full screen B-roll.
+     * 'full_speaker': 1080x1920 speaker only.
+   - Search Queries:
+     * Direct visual nouns and real archival footage (e.g. "Donald Trump oval office retro", "pills blister pack macro", "school lunch cafeteria tray").
+     * CRITICAL DEDUPLICATION RULE: If multiple scenes relate to the same subject, every scene MUST use a DIFFERENT visual search query (e.g. Query 1: "Donald Trump white house press conference retro", Query 2: "Trump walking helicopter marine one"). NEVER repeat the exact same search query!
+
+OUTPUT SCHEMA (Return ONLY valid JSON):
+{
+  "clip_id": 1,
+  "title": "story_slug",
+  "hook": "Exact opening 3s hook quote",
+  "rationale": "Why this 45s cut will hook viewers",
+  "segments": [
+    {"start": 745.2, "end": 748.5},
+    {"start": 810.0, "end": 830.4},
+    {"start": 890.1, "end": 905.0}
+  ],
+  "scenes": [
+    {
+      "start": 0.0,
+      "end": 3.3,
+      "layout": "splitscreen",
+      "search_query": "Donald Trump white house press conference retro"
+    },
+    {
+      "start": 3.3,
+      "end": 6.8,
+      "layout": "full_speaker",
+      "search_query": ""
+    },
+    {
+      "start": 6.8,
+      "end": 10.2,
+      "layout": "splitscreen",
+      "search_query": "Trump walking helicopter marine one"
+    }
+  ]
+}
+"""
+
+
+def discover_stories_heuristic(words: list[dict[str, Any]]) -> list[DiscoveredStory]:
+    """Heuristic story scout that splits transcript into coherent micro-stories."""
+    if not words:
+        return []
+
+    total_duration = words[-1]["end"]
+    # Determine target story duration window based on total audio length
+    if total_duration < 180.0:
+        window_duration = max(35.0, total_duration / 2.0)
+    elif total_duration < 1200.0:
+        window_duration = 240.0
+    else:
+        window_duration = 480.0
+
+    stories: list[DiscoveredStory] = []
+    current_start = words[0]["start"]
+    n_words = len(words)
+    w_idx = 0
+
+    story_idx = 1
+    while w_idx < n_words:
+        target_end = min(total_duration, current_start + window_duration)
+        # Find natural split point near target_end (question or long pause >= 1.0s)
+        end_idx = w_idx
+        for k in range(w_idx + 10, min(w_idx + 1500, n_words)):
+            t_k = words[k]["end"]
+            end_idx = k
+            if t_k >= target_end:
+                w_raw = words[k].get("word", "")
+                if any(p in w_raw for p in ["?", "!"]):
+                    break
+                if k + 1 < n_words and (words[k + 1]["start"] - words[k]["end"]) >= 1.0:
+                    break
+
+        slice_words = words[w_idx : end_idx + 1]
+        if not slice_words:
+            break
+
+        actual_start = slice_words[0]["start"]
+        actual_end = slice_words[-1]["end"]
+
+        # Find best hook quote in slice
+        hook = ""
+        for i in range(len(slice_words)):
+            if "?" in slice_words[i].get("word", "") or "!" in slice_words[i].get("word", ""):
+                h_start = max(0, i - 8)
+                h_slice = slice_words[h_start : i + 1]
+                hook = " ".join(w["word"] for w in h_slice)
+                break
+        if not hook or len(hook) < 15:
+            hook = " ".join(w["word"] for w in slice_words[:10])
+
+        # Extract dominant topic keywords for German summary
+        nouns_found: list[str] = []
+        for w in slice_words:
+            clean = re.sub(r"[^\w]", "", w.get("word", "").lower())
+            if clean in KNOWN_ENTITIES or clean in BRAND_ENTITIES:
+                if clean.capitalize() not in nouns_found:
+                    nouns_found.append(clean.capitalize())
+
+        if nouns_found:
+            topic_str = ", ".join(nouns_found[:3])
+            summary = f"In dieser Passage decken die Sprecher brisante Details über {topic_str} auf und ziehen schockierende Konsequenzen."
+        else:
+            summary = f"Eine emotionale Anekdote und Debatte über kontroverse Hintergründe, Machenschaften und gesellschaftliche Tabus."
+
+        stories.append(
+            DiscoveredStory(
+                story_id=story_idx,
+                summary=summary,
+                hook=hook,
+                start_sec=round(actual_start, 1),
+                end_sec=round(actual_end, 1),
+            )
+        )
+        story_idx += 1
+        w_idx = end_idx + 1
+        if w_idx < n_words:
+            current_start = words[w_idx]["start"]
+
+    return stories
+
+
+def discover_stories_with_llm(
+    full_text: str,
+    words: list[dict[str, Any]],
+) -> list[DiscoveredStory]:
+    """Uses LLM to discover all authentic micro-stories across the transcript."""
+    import openai
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is not set.")
+
+    # Format transcript with timestamps
+    sample_lines = []
+    for i in range(0, len(words), 30):
+        w = words[i]
+        sample_lines.append(f"[{w['start']:.1f}s] {w['word']}")
+    timecoded_excerpt = "\n".join(sample_lines[:150])
+
+    client = openai.OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+        messages=[
+            {"role": "system", "content": STORY_DISCOVERY_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"TRANSCRIPT TIME EXCERPTS:\n{timecoded_excerpt}\n\n"
+                    f"FULL TEXT SAMPLE:\n{full_text[:12000]}\n\n"
+                    "Find ALL genuine micro-stories, confessions, or anecdotes (no fixed count limit). Return valid JSON."
+                ),
+            },
+        ],
+        temperature=0.3,
+        response_format={"type": "json_object"},
+    )
+    raw_content = response.choices[0].message.content or "{}"
+    data = json.loads(raw_content)
+    if isinstance(data, dict):
+        # Could be {"stories": [...]}
+        for key in ["stories", "micro_stories", "clips"]:
+            if key in data and isinstance(data[key], list):
+                data = data[key]
+                break
+        else:
+            data = list(data.values())[0] if data else []
+
+    stories: list[DiscoveredStory] = []
+    for idx, item in enumerate(data, start=1):
+        stories.append(
+            DiscoveredStory(
+                story_id=idx,
+                summary=item.get("summary", "Spannende Micro-Story aus dem Podcast."),
+                hook=item.get("hook", ""),
+                start_sec=float(item.get("start_sec", 0.0)),
+                end_sec=float(item.get("end_sec", 60.0)),
+            )
+        )
+    return stories
+
+
+def discover_stories(
+    transcript_file: Path | str = Path("temp/full_transcript.txt"),
+    word_timestamps_file: Path | str = Path("temp/word_timestamps.json"),
+    prefer_llm: bool = True,
+) -> list[DiscoveredStory]:
+    """Phase 1 Story Discovery: finds all authentic micro-stories in raw transcript."""
+    full_text, words = _load_transcript_data(transcript_file, word_timestamps_file)
+    has_api_key = bool(os.getenv("OPENAI_API_KEY"))
+
+    if prefer_llm and has_api_key:
+        try:
+            logger.info("Discovering micro-stories via LLM...")
+            stories = discover_stories_with_llm(full_text, words)
+            if stories:
+                return stories
+        except Exception as exc:
+            logger.warning(f"LLM story discovery failed: {exc}. Using heuristic scout.")
+
+    logger.info("Discovering micro-stories via heuristic analyzer...")
+    return discover_stories_heuristic(words)
+
+
+def plan_story_heuristic(
+    story: DiscoveredStory,
+    words: list[dict[str, Any]],
+    feedback: str | None = None,
+) -> ClipProposal:
+    """Radical trimming and 2-4s B-roll plan for the selected micro-story."""
+    story_words = [
+        w for w in words
+        if w.get("start", 0) >= story.start_sec - 15.0 and w.get("end", 0) <= story.end_sec + 15.0
+    ]
+    if len(story_words) < 20:
+        story_words = words
+
+    # 1. Non-linear segments (Hook 0-3s, proof 20-30s, punchline 10-15s)
+    # Start with Context-Anchored Hook
+    hook_start = find_context_anchor_start(story_words, story.start_sec)
+    hook_end = hook_start + 3.8
+
+    # Narrative middle segment
+    mid_start = max(hook_end + 1.0, story.start_sec + 10.0)
+    mid_end = min(story.end_sec, mid_start + 25.0)
+
+    # Climax segment
+    climax_start = max(mid_end + 2.0, story.end_sec - 15.0)
+    climax_end = min(story.end_sec, climax_start + 14.0)
+
+    segments = [
+        Segment(start=hook_start, end=hook_end),
+        Segment(start=mid_start, end=mid_end),
+    ]
+    if climax_start < climax_end and (climax_end - climax_start) >= 5.0:
+        segments.append(Segment(start=climax_start, end=climax_end))
+
+    total_dur = sum(s.end - s.start for s in segments)
+    if total_dur < 30.0:
+        segments[-1].end = segments[-1].end + (32.0 - total_dur)
+    elif total_dur > 60.0:
+        segments[-1].end = max(segments[-1].start + 5.0, segments[-1].end - (total_dur - 56.0))
+
+    total_dur = round(sum(s.end - s.start for s in segments), 2)
+
+    # 2. Extract words in cut segments
+    cut_words = [
+        w for w in story_words
+        if any(s.start <= w.get("start", 0) <= s.end for s in segments)
+    ]
+
+    # 3. Generate high-retention visual scenes every 2 to 4 seconds with DIVERSE queries
+    scenes: list[SceneCut] = []
+    t_curr = 0.0
+    scene_idx = 1
+    seen_queries: set[str] = set()
+
+    DIVERSE_ANGLES = [
+        "white house press conference retro",
+        "archive b-roll vintage",
+        "walking helicopter tarmac",
+        "documents desk signing close up",
+        "oval office candid meeting",
+    ]
+
+    while t_curr < total_dur:
+        cut_len = round(min(3.2, total_dur - t_curr), 2)
+        if cut_len <= 0.8 and scenes:
+            scenes[-1].end = total_dur
+            break
+
+        t_end = round(t_curr + cut_len, 2)
+        slice_words = [
+            w for w in cut_words
+            if any(s.start <= w.get("start", 0) <= s.end for s in segments)
+        ]
+
+        # Alternate layout
+        if scene_idx % 3 == 1:
+            layout = "splitscreen"
+        elif scene_idx % 3 == 2:
+            layout = "full_speaker"
+        else:
+            layout = "splitscreen"
+
+        search_q = ""
+        if layout != "full_speaker":
+            # Search for salient entity in slice
+            candidate_q = ""
+            for w in slice_words:
+                cl = re.sub(r"[^\w]", "", w.get("word", "").lower())
+                if cl in BRAND_ENTITIES and BRAND_ENTITIES[cl].lower() not in seen_queries:
+                    candidate_q = BRAND_ENTITIES[cl]
+                    break
+                if cl in KNOWN_ENTITIES and f"{cl.capitalize()} official interview archive".lower() not in seen_queries:
+                    candidate_q = f"{cl.capitalize()} official interview archive"
+                    break
+
+            base_subjects = ["Donald Trump", "Terry McAuliffe", "Robert F Kennedy", "Capitol Congress", "White House Oval Office"]
+            base_subj = base_subjects[(scene_idx - 1) % len(base_subjects)]
+            angle = DIVERSE_ANGLES[(scene_idx - 1) % len(DIVERSE_ANGLES)]
+            search_q = candidate_q or f"{base_subj} {angle}"
+
+            # Guarantee strict uniqueness across all scenes in this short
+            attempt = 1
+            while search_q.lower() in seen_queries:
+                alt_subj = base_subjects[(scene_idx + attempt - 1) % len(base_subjects)]
+                alt_angle = DIVERSE_ANGLES[(scene_idx + attempt - 1) % len(DIVERSE_ANGLES)]
+                search_q = f"{alt_subj} {alt_angle} archive {attempt}"
+                attempt += 1
+
+            seen_queries.add(search_q.lower())
+
+        scenes.append(
+            SceneCut(
+                start=t_curr,
+                end=t_end,
+                layout=layout,
+                search_query=search_q,
+            )
+        )
+        t_curr = t_end
+        scene_idx += 1
+
+    return ClipProposal(
+        clip_id=story.story_id,
+        title=f"story_{story.story_id}",
+        hook=story.hook[:80],
+        rationale=story.summary,
+        segments=segments,
+        scenes=scenes,
+    )
+
+
+def plan_story_with_llm(
+    story: DiscoveredStory,
+    words: list[dict[str, Any]],
+    feedback: str | None = None,
+) -> ClipProposal:
+    """Uses LLM to create 30-60s script and 2-4s B-roll plan."""
+    import openai
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is not set.")
+
+    story_words = [
+        w for w in words
+        if w.get("start", 0) >= story.start_sec - 15.0 and w.get("end", 0) <= story.end_sec + 15.0
+    ]
+    if len(story_words) < 20:
+        story_words = words[:1000]
+
+    sample_lines = [f"[{w['start']:.1f}s] {w['word']}" for w in story_words]
+    timecoded_context = "\n".join(sample_lines[:400])
+
+    user_prompt = (
+        f"MICRO-STORY TO CONDENSE:\n"
+        f"Story ID: {story.story_id}\n"
+        f"Summary: {story.summary}\n"
+        f"Hook: {story.hook}\n"
+        f"Original Range: {story.time_range_str} ({story.start_sec}s - {story.end_sec}s)\n\n"
+        f"TIMECODED TRANSCRIPT EXCERPT:\n{timecoded_context}\n\n"
+    )
+    if feedback:
+        user_prompt += f"USER ADJUSTMENT FEEDBACK:\n{feedback}\nPlease adjust the script and visual plan accordingly!\n\n"
+
+    user_prompt += "Produce hyper-condensed 30-60s non-linear segments and visual cuts every 2-4s with strictly different search queries."
+
+    client = openai.OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+        messages=[
+            {"role": "system", "content": STORY_PLANNING_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+        response_format={"type": "json_object"},
+    )
+    raw_content = response.choices[0].message.content or "{}"
+    data = json.loads(raw_content)
+
+    segments = [Segment(**s) for s in data.get("segments", [])]
+    scenes = [SceneCut(**sc) for sc in data.get("scenes", [])]
+
+    return ClipProposal(
+        clip_id=story.story_id,
+        title=f"story_{story.story_id}",
+        hook=data.get("hook", story.hook),
+        rationale=data.get("rationale", story.summary),
+        segments=segments,
+        scenes=scenes,
+    )
+
+
+def plan_story_script_and_broll(
+    story: DiscoveredStory,
+    words: list[dict[str, Any]],
+    prefer_llm: bool = True,
+    feedback: str | None = None,
+) -> ClipProposal:
+    """Phase 2: Radical Trimming to 30-60s & 2-4s B-roll Plan."""
+    has_api_key = bool(os.getenv("OPENAI_API_KEY"))
+    if prefer_llm and has_api_key:
+        try:
+            logger.info(f"Planning 30-60s script and B-roll for Story {story.story_id} via LLM...")
+            prop = plan_story_with_llm(story, words, feedback=feedback)
+            return enforce_no_ambiguity_hook(prop, words)
+        except Exception as exc:
+            logger.warning(f"LLM story planning failed: {exc}. Using heuristic planner.")
+
+    prop = plan_story_heuristic(story, words, feedback=feedback)
+    return enforce_no_ambiguity_hook(prop, words)
+
+
+def format_storyboard_display(proposal: ClipProposal, story: DiscoveredStory | None = None) -> str:
+    """Formats the non-linear script and visual B-roll plan for terminal confirmation."""
+    lines = [
+        "",
+        "=" * 64,
+        "     >>> PHASE 2: RADIKALER STORY-SCHNITT & B-ROLL-PLAN",
+        "=" * 64,
+    ]
+    if story:
+        lines.append(f"Story [{story.story_id}]: {story.summary}")
+        lines.append(f"Original-Zeitbereich: {story.time_range_str}")
+    lines.append(f"Geplante Short-Dauer: {proposal.total_duration:.1f}s (Non-linear verdichtet)")
+    lines.append(f'Hook (0-3s): "{proposal.hook}"')
+    lines.append("")
+    lines.append("--- NON-LINEARE SCHNITT-SEGMENTE ---")
+    for idx, seg in enumerate(proposal.segments, start=1):
+        s_m, s_s = int(seg.start // 60), int(seg.start % 60)
+        e_m, e_s = int(seg.end // 60), int(seg.end % 60)
+        lines.append(
+            f"  Segment {idx}: Min {s_m}:{s_s:02d} -> Min {e_m}:{e_s:02d} "
+            f"({seg.end - seg.start:.1f}s aus Original-Video)"
+        )
+    lines.append("")
+    lines.append("--- VISUELLER B-ROLL-PLAN (Cuts alle 2-4s) ---")
+    for idx, sc in enumerate(proposal.scenes, start=1):
+        dur = sc.end - sc.start
+        if sc.layout == "full_speaker":
+            q_info = "(Sprecher getrackt / Proportional Face-Centering)"
+        else:
+            q_info = f'Query: "{sc.search_query}"'
+        lines.append(f"  [{sc.start:4.1f}s - {sc.end:4.1f}s] ({dur:.1f}s) layout: {sc.layout:<12} | {q_info}")
+    lines.append("=" * 64)
+    return "\n".join(lines)
+

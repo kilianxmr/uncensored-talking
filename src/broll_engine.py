@@ -607,7 +607,28 @@ def source_broll_for_clip(
         except Exception as exc:
             logger.debug(f"Could not load word timestamps for Topic Guard: {exc}")
 
-    # Deduplication tracking: list/set of all B-roll asset paths used in this clip
+    # 0. Strict Query Diversification: Ensure all visual scene queries are distinct
+    seen_queries: set[str] = set()
+    QUERY_ANGLES = [
+        "retro archive footage",
+        "press conference retro",
+        "walking candid outdoor",
+        "close up macro detail",
+        "documentary b-roll hd",
+        "historical archive candid",
+    ]
+    for sc in clip.scenes:
+        if sc.layout in ("full_broll", "splitscreen") and sc.search_query:
+            clean_q = sanitize_query(sc.search_query).strip()
+            lower_q = clean_q.lower()
+            if lower_q in seen_queries:
+                mod = QUERY_ANGLES[len(seen_queries) % len(QUERY_ANGLES)]
+                sc.search_query = f"{clean_q} {mod}"
+                logger.info(f"Query diversification: differentiated scene query to '{sc.search_query}'")
+            seen_queries.add(sc.search_query.strip().lower())
+
+    # Deduplication tracking: set of all asset IDs and output paths used in this clip
+    used_asset_ids: set[str] = set()
     used_asset_paths: set[str] = set()
 
     for idx, scene in enumerate(clip.scenes, start=1):
@@ -617,7 +638,7 @@ def source_broll_for_clip(
         target_w = 1080
         target_h = 960 if scene.layout == "splitscreen" else 1920
 
-        # Strict Topic Guard verification
+        # Extract spoken text in this scene slice for contextual alignment
         spoken_text = ""
         if local_words:
             scene_words = [
@@ -625,26 +646,19 @@ def source_broll_for_clip(
                 if w.get("start", 0) <= scene.end and w.get("end", 0) >= scene.start
             ]
             spoken_text = " ".join(w.get("word", "") for w in scene_words)
+            if not spoken_text.strip():
+                # Broader context fallback
+                spoken_text = " ".join(w.get("word", "") for w in local_words[:20])
 
-        is_topic_valid, guard_reason = check_topic_guard(scene, spoken_text)
-        if not is_topic_valid:
-            logger.info(
-                f"Strict Topic Guard: Scene {idx} [{scene.start:.1f}s - {scene.end:.1f}s] rejected B-roll query '{scene.search_query}': {guard_reason}. "
-                f"Reverting layout to 'full_speaker'."
-            )
-            scene.layout = "full_speaker"
-            scene.search_query = ""
-            scene.broll_asset_path = None
-            continue
-
-        query = scene.search_query
+        query = scene.search_query or "archive documentary footage"
         slug = sanitize_query(query).replace(" ", "_")[:25] or "scene"
 
         # Category A Priority 1: Clean Brand Logo Plate
         if "logo" in query.lower() or "transparent png" in query.lower():
             logo_plate = broll_cache / f"scene_{idx}_{slug}_logo.mp4"
             resolved_logo = str(logo_plate.resolve())
-            if resolved_logo not in used_asset_paths:
+            logo_asset_id = f"logo_{slug}"
+            if logo_asset_id not in used_asset_ids and resolved_logo not in used_asset_paths:
                 render_brand_logo_plate(
                     brand_query=query,
                     output_path=logo_plate,
@@ -654,50 +668,45 @@ def source_broll_for_clip(
                 )
                 scene.broll_asset_path = resolved_logo
                 used_asset_paths.add(resolved_logo)
+                used_asset_ids.add(logo_asset_id)
                 continue
 
         # 1. Check manual drop in input/broll (respecting deduplication)
         manual_asset = check_manual_broll_drop(query)
-        if manual_asset and str(manual_asset.resolve()) not in used_asset_paths:
-            final_plate = broll_cache / f"scene_{idx}_{slug}_manual.mp4"
-            if manual_asset.suffix.lower() in [".jpg", ".png", ".webp"]:
-                apply_focal_ken_burns(
-                    image_path=manual_asset,
-                    output_path=final_plate,
-                    duration=scene.duration,
-                    target_width=target_w,
-                    target_height=target_h,
-                )
-            else:
-                extract_peak_motion_snippet(
-                    video_path=manual_asset,
-                    output_path=final_plate,
-                    target_duration=scene.duration,
-                    target_width=target_w,
-                    target_height=target_h,
-                    min_offset_sec=0.0,
-                )
-            resolved_plate = str(final_plate.resolve())
-            scene.broll_asset_path = resolved_plate
-            used_asset_paths.add(resolved_plate)
-            continue
+        if manual_asset:
+            manual_asset_id = f"{manual_asset.name}_{manual_asset.stat().st_size}"
+            if manual_asset_id not in used_asset_ids:
+                final_plate = broll_cache / f"scene_{idx}_{slug}_manual.mp4"
+                if manual_asset.suffix.lower() in [".jpg", ".png", ".webp"]:
+                    apply_focal_ken_burns(
+                        image_path=manual_asset,
+                        output_path=final_plate,
+                        duration=scene.duration,
+                        target_width=target_w,
+                        target_height=target_h,
+                    )
+                else:
+                    extract_peak_motion_snippet(
+                        video_path=manual_asset,
+                        output_path=final_plate,
+                        target_duration=scene.duration,
+                        target_width=target_w,
+                        target_height=target_h,
+                        min_offset_sec=0.0,
+                    )
+                resolved_plate = str(final_plate.resolve())
+                scene.broll_asset_path = resolved_plate
+                used_asset_paths.add(resolved_plate)
+                used_asset_ids.add(manual_asset_id)
+                continue
 
-        # 2. Search YouTube real archive footage with Top-3 candidates & Quality Gate
+        # 2. Search YouTube real archive footage with Top-5 candidates & Strict Deduplication
         h_query = hashlib.md5(query.encode()).hexdigest()[:8]
         found_valid = False
 
-        for cand_idx in range(1, 4):
+        for cand_idx in range(1, 6):
             final_plate = broll_cache / f"scene_{idx}_{slug}_c{cand_idx}.mp4"
             resolved_plate = str(final_plate.resolve())
-
-            # Check if this candidate was already processed and not yet used in this clip
-            if final_plate.exists() and final_plate.stat().st_size > 5000 and resolved_plate not in used_asset_paths:
-                is_valid, _ = validate_broll_frame(final_plate)
-                if is_valid:
-                    scene.broll_asset_path = resolved_plate
-                    used_asset_paths.add(resolved_plate)
-                    found_valid = True
-                    break
 
             raw_yt_video = broll_cache / f"raw_yt_{h_query}_c{cand_idx}.mp4"
             if not raw_yt_video.exists() or raw_yt_video.stat().st_size < 50000:
@@ -708,6 +717,14 @@ def source_broll_for_clip(
                 )
 
             if raw_yt_video.exists() and raw_yt_video.stat().st_size > 50000:
+                raw_asset_id = f"{raw_yt_video.name}_{raw_yt_video.stat().st_size}"
+                if raw_asset_id in used_asset_ids:
+                    logger.info(
+                        f"Deduplication: Candidate {cand_idx} for '{query}' already used in this short. "
+                        f"Trying next candidate..."
+                    )
+                    continue
+
                 try:
                     extract_peak_motion_snippet(
                         video_path=raw_yt_video,
@@ -721,26 +738,32 @@ def source_broll_for_clip(
                     if is_valid and resolved_plate not in used_asset_paths:
                         scene.broll_asset_path = resolved_plate
                         used_asset_paths.add(resolved_plate)
+                        used_asset_ids.add(raw_asset_id)
                         found_valid = True
                         break
                     else:
                         logger.warning(
-                            f"Candidate {cand_idx} for '{query}' failed quality gate or was duplicate: {reason}. "
+                            f"Candidate {cand_idx} for '{query}' failed quality gate ({reason}). "
                             f"Trying next search candidate..."
                         )
                 except Exception as exc:
-                    logger.warning(f"Error extracting motion snippet from candidate {cand_idx} ('{raw_yt_video}'): {exc}")
+                    logger.warning(f"Error extracting motion snippet from candidate {cand_idx}: {exc}")
 
         if found_valid:
             continue
 
-        # 3. Topic Guard fallback: Revert to full_speaker instead of forcing unrelated footage
-        logger.info(
-            f"Strict Topic Guard: No quality-gated footage found for '{query}'. "
-            f"Reverting scene {idx} to 'full_speaker' (Better no B-roll than unfitting B-roll)."
+        # 3. Visual Asset Guarantee: Engine MUST load a visual asset for splitscreen/full_broll
+        fallback_plate = broll_cache / f"scene_{idx}_{slug}_motion.mp4"
+        generate_cinematic_fallback(
+            output_path=fallback_plate,
+            duration=scene.duration,
+            width=target_w,
+            height=target_h,
+            query=query,
         )
-        scene.layout = "full_speaker"
-        scene.search_query = ""
-        scene.broll_asset_path = None
+        resolved_fb = str(fallback_plate.resolve())
+        scene.broll_asset_path = resolved_fb
+        used_asset_paths.add(resolved_fb)
+        logger.info(f"Loaded guaranteed visual motion plate for scene {idx}: {fallback_plate.name}")
 
     return clip.scenes

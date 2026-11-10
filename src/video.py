@@ -314,6 +314,7 @@ def render_clip(
     subtitles_ass_path: Path | str | None = None,
     bg_music_path: Path | str | None = DEFAULT_BG_MUSIC_PATH,
     bg_music_volume: float = 0.12,
+    output_filename: str | Path | None = None,
 ) -> Path:
     """
     Renders complete viral short:
@@ -332,8 +333,16 @@ def render_clip(
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    slug = clip.title.strip().replace(" ", "_").lower()
-    output_clip_path = output_dir / f"clip_{clip.clip_id}_{slug}.mp4"
+    if output_filename:
+        out_name = Path(output_filename).name
+        if not out_name.endswith(".mp4"):
+            out_name += ".mp4"
+        output_clip_path = output_dir / out_name
+    elif clip.title.startswith("story_"):
+        output_clip_path = output_dir / f"{clip.title}.mp4"
+    else:
+        slug = clip.title.strip().replace(" ", "_").lower()
+        output_clip_path = output_dir / f"clip_{clip.clip_id}_{slug}.mp4"
 
     if output_clip_path.exists() and not overwrite:
         logger.info(f"Clip {clip.clip_id} already exists at: {output_clip_path}")
