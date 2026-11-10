@@ -298,3 +298,24 @@ def test_strict_topic_guard():
     assert not is_valid
     assert "no noun overlap" in reason.lower() or "rejected" in reason.lower()
 
+
+def test_background_music_asset_and_pipeline_integration():
+    from src.video import DEFAULT_BG_MUSIC_PATH
+
+    # 1. Verify permanent pre-cut music asset exists in assets/audio/
+    assert DEFAULT_BG_MUSIC_PATH.is_file(), f"Background music file not found at {DEFAULT_BG_MUSIC_PATH}"
+    file_size = DEFAULT_BG_MUSIC_PATH.stat().st_size
+    assert file_size > 500_000, f"Background music file unexpectedly small ({file_size} bytes)"
+
+    # 2. Check duration with ffprobe: must be >= 120s (cut from 32s onwards of the original 3m05s track)
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(DEFAULT_BG_MUSIC_PATH),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    duration = float(res.stdout.strip())
+    assert 140.0 <= duration <= 165.0, f"Expected cut duration ~153s from s32, got {duration}s"
+
+

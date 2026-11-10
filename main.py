@@ -170,6 +170,23 @@ def main() -> None:
         help="Force re-download, re-transcription, and re-rendering of clips.",
     )
     parser.add_argument(
+        "--bg-music",
+        type=str,
+        default=os.getenv("BACKGROUND_MUSIC_PATH", "assets/audio/background_music.mp3"),
+        help="Path to permanent background music track (default: assets/audio/background_music.mp3).",
+    )
+    parser.add_argument(
+        "--bg-music-volume",
+        type=float,
+        default=float(os.getenv("BACKGROUND_MUSIC_VOLUME", "0.12")),
+        help="Volume of background music relative to speech (default: 0.12).",
+    )
+    parser.add_argument(
+        "--no-bg-music",
+        action="store_true",
+        help="Disable background music mixing in output shorts.",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose debug logging.",
@@ -276,8 +293,9 @@ def main() -> None:
             output_dir=sub_dir,
         )
 
-        # 6. Render video clip with proportional anti-stretch scaling & smoothed face tracking
+        # 6. Render video clip with proportional anti-stretch scaling, smoothed face tracking & background music
         encoder_choice = None if args.encoder == "auto" else args.encoder
+        bg_music = None if args.no_bg_music else args.bg_music
         out_clip = render_clip(
             source_video_path=input_video,
             clip=cp,
@@ -285,6 +303,8 @@ def main() -> None:
             output_dir=output_dir,
             force_encoder=encoder_choice,
             overwrite=True,
+            bg_music_path=bg_music,
+            bg_music_volume=args.bg_music_volume,
         )
         rendered_clips.append(out_clip)
 

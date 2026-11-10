@@ -301,6 +301,9 @@ def render_scene_plate(
     return output_plate
 
 
+DEFAULT_BG_MUSIC_PATH = (Path(__file__).parent.parent / "assets" / "audio" / "background_music.mp3").resolve()
+
+
 def render_clip(
     source_video_path: Path | str,
     clip: ClipProposal,
@@ -309,14 +312,17 @@ def render_clip(
     force_encoder: str | None = None,
     overwrite: bool = True,
     subtitles_ass_path: Path | str | None = None,
+    bg_music_path: Path | str | None = DEFAULT_BG_MUSIC_PATH,
+    bg_music_volume: float = 0.12,
 ) -> Path:
     """
     Renders complete viral short:
     1. Renders scene cuts with anti-stretch proportional scaling & dynamic face tracking.
     2. Stitches visual scene plates together.
     3. Extracts master audio corresponding to non-linear cut segments.
-    4. Burns in Pillow PNG gradient subtitles via FFmpeg overlay (or ASS fallback).
-    5. Exports with NVENC or libx264.
+    4. Mixes pre-cut background music track ('Me and the Devil' from s32) under speech.
+    5. Burns in Pillow PNG gradient subtitles via FFmpeg overlay (or ASS fallback).
+    6. Exports with NVENC or libx264.
     """
     source_video_path = Path(source_video_path).resolve()
     sub_arg = subtitles_source or subtitles_ass_path
@@ -420,6 +426,15 @@ def render_clip(
         else:
             use_nvenc = check_nvenc_support()
 
+    active_bg_music: Path | None = None
+    if bg_music_path:
+        bmp = Path(bg_music_path).resolve()
+        if bmp.is_file():
+            active_bg_music = bmp
+            logger.info(f"Embedding background music: {active_bg_music.name} (volume: {bg_music_volume:.2f})")
+        else:
+            logger.warning(f"Background music file not found at {bmp}. Proceeding without background music.")
+
     # Determine if subtitle source is PNG concat file or ASS file
     is_png_concat = subtitles_path.name.endswith(".txt") or (
         subtitles_path.is_file() and "subtitles_concat" in subtitles_path.name
@@ -427,26 +442,61 @@ def render_clip(
 
     if is_png_concat:
         # Burning via FFmpeg overlay
-        cmd_final = [
-            "ffmpeg", "-y" if overwrite else "-n",
-            "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
-            "-f", "concat", "-safe", "0", "-i", str(subtitles_path),
-            "-i", str(clip_audio_file),
-            "-filter_complex", "[0:v][1:v]overlay=0:0:shortest=1[v_final]",
-            "-map", "[v_final]",
-            "-map", "2:a",
-        ]
+        if active_bg_music:
+            filter_complex = [
+                "[0:v][1:v]overlay=0:0:shortest=1[v_final]",
+                "[2:a]volume=1.0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_speech]",
+                f"[3:a]volume={bg_music_volume:.2f},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_bg]",
+                "[a_speech][a_bg]amix=inputs=2:duration=first:dropout_transition=2[a_final]",
+            ]
+            cmd_final = [
+                "ffmpeg", "-y" if overwrite else "-n",
+                "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+                "-f", "concat", "-safe", "0", "-i", str(subtitles_path),
+                "-i", str(clip_audio_file),
+                "-stream_loop", "-1", "-i", str(active_bg_music),
+                "-filter_complex", ";".join(filter_complex),
+                "-map", "[v_final]",
+                "-map", "[a_final]",
+            ]
+        else:
+            cmd_final = [
+                "ffmpeg", "-y" if overwrite else "-n",
+                "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+                "-f", "concat", "-safe", "0", "-i", str(subtitles_path),
+                "-i", str(clip_audio_file),
+                "-filter_complex", "[0:v][1:v]overlay=0:0:shortest=1[v_final]",
+                "-map", "[v_final]",
+                "-map", "2:a",
+            ]
     else:
         # Fallback ASS burning
         escaped_ass = subtitles_path.as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-        cmd_final = [
-            "ffmpeg", "-y" if overwrite else "-n",
-            "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
-            "-i", str(clip_audio_file),
-            "-vf", f"ass='{escaped_ass}'",
-            "-map", "0:v",
-            "-map", "1:a",
-        ]
+        if active_bg_music:
+            filter_complex = [
+                f"[0:v]ass='{escaped_ass}'[v_final]",
+                "[1:a]volume=1.0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_speech]",
+                f"[2:a]volume={bg_music_volume:.2f},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_bg]",
+                "[a_speech][a_bg]amix=inputs=2:duration=first:dropout_transition=2[a_final]",
+            ]
+            cmd_final = [
+                "ffmpeg", "-y" if overwrite else "-n",
+                "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+                "-i", str(clip_audio_file),
+                "-stream_loop", "-1", "-i", str(active_bg_music),
+                "-filter_complex", ";".join(filter_complex),
+                "-map", "[v_final]",
+                "-map", "[a_final]",
+            ]
+        else:
+            cmd_final = [
+                "ffmpeg", "-y" if overwrite else "-n",
+                "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+                "-i", str(clip_audio_file),
+                "-vf", f"ass='{escaped_ass}'",
+                "-map", "0:v",
+                "-map", "1:a",
+            ]
 
     if use_nvenc:
         cmd_final.extend([
