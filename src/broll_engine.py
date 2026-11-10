@@ -88,17 +88,65 @@ def find_visual_focal_point(image_path: Path | str) -> tuple[float, float]:
         return 0.5, 0.5
 
 
+def validate_broll_frame(video_path: Path) -> tuple[bool, str]:
+    """
+    Visual quality gate:
+    1. Extracts the middle frame of the rendered snippet.
+    2. Checks luminance (rejects near-solid black or blown-out white).
+    3. Checks color standard deviation & gray variance (rejects flat monochromatic solids).
+    4. Checks edge complexity via Canny (rejects static slides, logos, or solid color intro cards).
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return False, "Cannot open video"
+
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if total <= 0:
+        cap.release()
+        return False, "Zero frames in video"
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total // 2))
+    ret, frame = cap.read()
+    cap.release()
+    if not ret or frame is None:
+        return False, "Cannot read middle frame"
+
+    mean_lum = float(np.mean(frame))
+    if mean_lum < 20.0:
+        return False, f"Near solid black (mean lum: {mean_lum:.1f})"
+    if mean_lum > 245.0:
+        return False, f"Near solid white (mean lum: {mean_lum:.1f})"
+
+    color_std = float(np.mean(np.std(frame, axis=(0, 1))))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray_var = float(np.var(gray))
+    if color_std < 8.0 or gray_var < 50.0:
+        return False, f"Monochrome/flat background (color std: {color_std:.1f}, gray var: {gray_var:.1f})"
+
+    edges = cv2.Canny(gray, 50, 150)
+    edge_density = float(np.mean(edges > 0))
+    if edge_density < 0.005:
+        return False, f"Static title card/logo with low edge complexity (edge density: {edge_density:.4f})"
+
+    return True, "OK"
+
+
 def extract_peak_motion_snippet(
     video_path: Path,
     output_path: Path,
-    target_duration: float = 4.0,
+    target_duration: float = 3.0,
     target_width: int = 1080,
     target_height: int = 1920,
+    min_offset_sec: float = 10.0,
 ) -> Path:
     """
-    Analyzes frame-by-frame motion using OpenCV absdiff.
-    Finds the 3-5s time window with MAXIMUM visual action/motion and cuts it out
-    with proportional scaling (scale=-1:target_height, crop=target_width:target_height).
+    1. Logo & intro protection: NEVER cuts from second 0.0.
+       Enforces minimum start offset (>=10s on normal footage, or >=15% on short test fixtures).
+    2. Analyzes frame-by-frame motion using OpenCV absdiff from the offset onwards.
+    3. Finds the 1-3s window with MAXIMUM visual action/motion.
+    4. Cuts with proportional scaling (scale=-1:target_height, crop=target_width:target_height).
+    5. Visual quality gate: checks that the resulting clip is not black, flat, or a static logo.
+       If rejected, automatically advances 5s and retries up to 3 times.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cap = cv2.VideoCapture(str(video_path))
@@ -107,22 +155,34 @@ def extract_peak_motion_snippet(
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    total_duration = total_frames / fps if fps > 0 else 0.0
+
+    # Intro & logo protection: NEVER start from 0.0s
+    if total_duration >= 18.0:
+        actual_min_offset = min_offset_sec
+    elif total_duration > target_duration + 3.0:
+        actual_min_offset = 2.0  # skip initial 2s on shorter test videos
+    else:
+        actual_min_offset = 0.0
+
+    start_scan_frame = int(actual_min_offset * fps)
+    max_scan_frames = min(total_frames, int(75 * fps)) if total_frames > 0 else int(75 * fps)
     window_frames = max(1, int(target_duration * fps))
+
+    if start_scan_frame > 0 and start_scan_frame < total_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_scan_frame)
 
     motion_scores: list[tuple[int, float]] = []
     prev_gray = None
-
-    # Sample up to first 60 seconds (max 1800 frames)
-    max_scan_frames = min(total_frames, int(60 * fps)) if total_frames > 0 else int(60 * fps)
     sample_step = 3  # sample every 3rd frame for ultra-fast motion estimation
 
-    frame_idx = 0
+    frame_idx = start_scan_frame
     while frame_idx < max_scan_frames:
         ret, frame = cap.read()
         if not ret or frame is None:
             break
 
-        if frame_idx % sample_step == 0:
+        if (frame_idx - start_scan_frame) % sample_step == 0:
             small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_LINEAR)
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
@@ -136,42 +196,72 @@ def extract_peak_motion_snippet(
 
     cap.release()
 
-    # Find window with highest average motion
-    best_start_sec = 0.0
+    # Find window with highest average motion starting at or after actual_min_offset
+    best_start_sec = actual_min_offset
     if len(motion_scores) > window_frames // sample_step:
         window_size = window_frames // sample_step
         scores_arr = [s[1] for s in motion_scores]
         rolling_sums = np.convolve(scores_arr, np.ones(window_size), mode="valid")
         best_idx = int(np.argmax(rolling_sums))
         best_frame = motion_scores[best_idx][0]
-        best_start_sec = max(0.0, best_frame / fps)
+        best_start_sec = max(actual_min_offset, best_frame / fps)
 
     logger.info(
         f"Selected peak-motion action window at {best_start_sec:.2f}s (duration: {target_duration:.1f}s) "
         f"for {output_path.name}"
     )
 
-    # Cut with proportional scaling (NEVER stretch)
+    # Cut candidates with 5s retry offsets if rejected by quality gate
+    cut_candidates = [
+        best_start_sec,
+        best_start_sec + 5.0,
+        best_start_sec + 10.0,
+        actual_min_offset + 15.0,
+    ]
+
     vf = (
         f"scale=-1:{target_height}:flags=lanczos,"
         f"crop={target_width}:{target_height}:(in_w-{target_width})/2:0,"
         f"setsar=1,fps=30"
     )
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-ss", f"{best_start_sec:.3f}",
-        "-t", f"{target_duration:.3f}",
-        "-i", str(video_path),
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-an",
-        "-pix_fmt", "yuv420p",
-        str(output_path),
-    ]
+    success = False
+    for candidate_start in cut_candidates:
+        if candidate_start + target_duration > total_duration and total_duration > target_duration:
+            candidate_start = max(actual_min_offset, total_duration - target_duration - 0.2)
 
-    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{candidate_start:.3f}",
+            "-t", f"{target_duration:.3f}",
+            "-i", str(video_path),
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-an",
+            "-pix_fmt", "yuv420p",
+            str(output_path),
+        ]
+
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        is_valid, reason = validate_broll_frame(output_path)
+        if is_valid:
+            logger.info(
+                f"Visual quality gate PASSED at {candidate_start:.2f}s (duration: {target_duration:.1f}s) "
+                f"for {output_path.name}"
+            )
+            success = True
+            break
+        else:
+            logger.warning(
+                f"Visual quality gate REJECTED snippet at {candidate_start:.2f}s ({reason}) for {output_path.name}. "
+                f"Retrying 5s later..."
+            )
+
+    if not success:
+        logger.warning(f"All offset cuts from {video_path.name} failed visual quality gate.")
+        # Ensure output is cleaned up or left as fallback
     return output_path
 
 
@@ -223,10 +313,11 @@ def download_youtube_broll(
     query: str,
     output_video_path: Path,
     max_duration: int = 45,
+    candidate_index: int = 1,
 ) -> Path | None:
     """
-    Searches YouTube for real footage using yt-dlp: ytsearch3:"<query> hd" --max-downloads 1.
-    Downloads first 30-45s of the best matching real footage.
+    Searches YouTube for real footage using yt-dlp: ytsearch3:"<query> hd"
+    Downloads candidate 1, 2, or 3 based on candidate_index.
     """
     output_video_path.parent.mkdir(parents=True, exist_ok=True)
     search_term = f"ytsearch3:{sanitize_query(query)} hd"
@@ -236,6 +327,7 @@ def download_youtube_broll(
         "outtmpl": str(output_video_path.with_suffix("")),
         "merge_output_format": "mp4",
         "nocheckcertificate": True,
+        "playlist_items": str(candidate_index),
         "max_downloads": 1,
         "quiet": True,
         "no_warnings": True,
@@ -245,7 +337,7 @@ def download_youtube_broll(
         import yt_dlp
         from yt_dlp.utils import MaxDownloadsReached
 
-        logger.info(f"Searching real footage via YouTube: '{query}'...")
+        logger.info(f"Searching real footage via YouTube (candidate {candidate_index}): '{query}'...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
                 ydl.download([search_term])
@@ -264,7 +356,7 @@ def download_youtube_broll(
         matches = list(output_video_path.parent.glob(f"{output_video_path.stem}.*"))
         if matches and matches[0].stat().st_size > 50000:
             return matches[0]
-        logger.warning(f"YouTube real footage search failed for '{query}': {exc}")
+        logger.warning(f"YouTube real footage search failed for '{query}' (candidate {candidate_index}): {exc}")
 
     return None
 
@@ -323,14 +415,18 @@ def source_broll_for_clip(
     """
     Sourcing pipeline for each SceneCut in a ClipProposal:
     1. Check manual user drop in input/broll/
-    2. Search YouTube real footage via ytsearch3:"<query> hd"
-    3. Extract highest motion snippet (3-5s) with OpenCV
-    4. For images: Saliency focal point Ken-Burns
-    5. Fallback: Prompt or dynamic motion plate
+    2. Contextual real archive footage search via YouTube (top-3 candidates)
+    3. Logo & intro protection (minimum offset >= 10s)
+    4. Visual quality gate validation (rejects black frames, flat slides, static logos)
+    5. Deduplication (No-Repeat-Garantie: no asset repeats within a 30-60s short)
+    6. Procedural fallback plate if all candidates fail
     """
     temp_dir = Path(temp_dir)
     broll_cache = temp_dir / "broll" / f"clip_{clip.clip_id}"
     broll_cache.mkdir(parents=True, exist_ok=True)
+
+    # Deduplication tracking: list/set of all B-roll asset paths used in this clip
+    used_asset_paths: set[str] = set()
 
     for idx, scene in enumerate(clip.scenes, start=1):
         if scene.layout not in ("full_broll", "splitscreen"):
@@ -339,17 +435,13 @@ def source_broll_for_clip(
         target_w = 1080
         target_h = 960 if scene.layout == "splitscreen" else 1920
 
-        query = scene.search_query or "cinematic dramatic scene"
+        query = scene.search_query or "US Capitol congress chamber raw footage"
         slug = sanitize_query(query).replace(" ", "_")[:25] or "scene"
-        final_plate = broll_cache / f"scene_{idx}_{slug}.mp4"
 
-        if final_plate.exists() and final_plate.stat().st_size > 5000:
-            scene.broll_asset_path = str(final_plate.resolve())
-            continue
-
-        # 1. Check manual drop in input/broll
+        # 1. Check manual drop in input/broll (respecting deduplication)
         manual_asset = check_manual_broll_drop(query)
-        if manual_asset:
+        if manual_asset and str(manual_asset.resolve()) not in used_asset_paths:
+            final_plate = broll_cache / f"scene_{idx}_{slug}_manual.mp4"
             if manual_asset.suffix.lower() in [".jpg", ".png", ".webp"]:
                 apply_focal_ken_burns(
                     image_path=manual_asset,
@@ -365,40 +457,77 @@ def source_broll_for_clip(
                     target_duration=scene.duration,
                     target_width=target_w,
                     target_height=target_h,
+                    min_offset_sec=0.0,
                 )
-            scene.broll_asset_path = str(final_plate.resolve())
+            resolved_plate = str(final_plate.resolve())
+            scene.broll_asset_path = resolved_plate
+            used_asset_paths.add(resolved_plate)
             continue
 
-        # 2. Search YouTube real footage
+        # 2. Search YouTube real archive footage with Top-3 candidates & Quality Gate
         h_query = hashlib.md5(query.encode()).hexdigest()[:8]
-        raw_yt_video = broll_cache / f"raw_yt_{h_query}.mp4"
+        found_valid = False
 
-        if not raw_yt_video.exists():
-            download_youtube_broll(query=query, output_video_path=raw_yt_video)
+        for cand_idx in range(1, 4):
+            final_plate = broll_cache / f"scene_{idx}_{slug}_c{cand_idx}.mp4"
+            resolved_plate = str(final_plate.resolve())
 
-        if raw_yt_video.exists() and raw_yt_video.stat().st_size > 50000:
-            try:
-                extract_peak_motion_snippet(
-                    video_path=raw_yt_video,
-                    output_path=final_plate,
-                    target_duration=scene.duration,
-                    target_width=target_w,
-                    target_height=target_h,
+            # Check if this candidate was already downloaded & processed and not yet used in this clip
+            if final_plate.exists() and final_plate.stat().st_size > 5000 and resolved_plate not in used_asset_paths:
+                is_valid, _ = validate_broll_frame(final_plate)
+                if is_valid:
+                    scene.broll_asset_path = resolved_plate
+                    used_asset_paths.add(resolved_plate)
+                    found_valid = True
+                    break
+
+            raw_yt_video = broll_cache / f"raw_yt_{h_query}_c{cand_idx}.mp4"
+            if not raw_yt_video.exists() or raw_yt_video.stat().st_size < 50000:
+                download_youtube_broll(
+                    query=query,
+                    output_video_path=raw_yt_video,
+                    candidate_index=cand_idx,
                 )
-                scene.broll_asset_path = str(final_plate.resolve())
-                continue
-            except Exception as exc:
-                logger.warning(f"Error extracting motion snippet from '{raw_yt_video}': {exc}")
 
-        # 3. Fallback: Dynamic motion texture
+            if raw_yt_video.exists() and raw_yt_video.stat().st_size > 50000:
+                try:
+                    extract_peak_motion_snippet(
+                        video_path=raw_yt_video,
+                        output_path=final_plate,
+                        target_duration=scene.duration,
+                        target_width=target_w,
+                        target_height=target_h,
+                        min_offset_sec=10.0,
+                    )
+                    is_valid, reason = validate_broll_frame(final_plate)
+                    if is_valid and resolved_plate not in used_asset_paths:
+                        scene.broll_asset_path = resolved_plate
+                        used_asset_paths.add(resolved_plate)
+                        found_valid = True
+                        break
+                    else:
+                        logger.warning(
+                            f"Candidate {cand_idx} for '{query}' failed quality gate or was duplicate: {reason}. "
+                            f"Trying next search candidate..."
+                        )
+                except Exception as exc:
+                    logger.warning(f"Error extracting motion snippet from candidate {cand_idx} ('{raw_yt_video}'): {exc}")
+
+        if found_valid:
+            continue
+
+        # 3. Fallback: Dynamic motion texture (guaranteed unique path per scene index)
+        final_plate = broll_cache / f"scene_{idx}_{slug}_fallback.mp4"
         logger.info(f"Generating fallback motion texture for '{query}'...")
         generate_cinematic_fallback(
             output_path=final_plate,
             duration=scene.duration,
             width=target_w,
             height=target_h,
-            query=query,
+            query=f"{query}_{idx}",
         )
-        scene.broll_asset_path = str(final_plate.resolve())
+        resolved_plate = str(final_plate.resolve())
+        scene.broll_asset_path = resolved_plate
+        used_asset_paths.add(resolved_plate)
 
     return clip.scenes

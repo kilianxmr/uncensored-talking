@@ -159,3 +159,56 @@ def test_anti_stretch_rendering_and_png_overlay(tmp_path: Path):
     w, h = get_video_dimensions(out_clip)
     assert w == 1080
     assert h == 1920
+
+
+def test_contextual_broll_queries():
+    from src.selector import extract_contextual_broll_query
+
+    q_trump = extract_contextual_broll_query("and President Trump said we must reform this")
+    assert "Trump" in q_trump
+    assert "rare oval office" in q_trump
+
+    q_musk = extract_contextual_broll_query("Elon Musk thinks AI will replace work soon")
+    assert "Elon Musk" in q_musk
+
+    q_lunch = extract_contextual_broll_query("school lunch is full of donuts and pastries for kids")
+    assert "school lunch" in q_lunch
+
+    q_obama = extract_contextual_broll_query("Obamacare exploded insurance costs")
+    assert "Obama" in q_obama
+
+    # Metaphor avoidance: 'money' or 'beef' without context does not yield steak or gold bullion
+    q_general = extract_contextual_broll_query("they talked about the rules of the game")
+    assert "steak" not in q_general.lower()
+    assert "gold bullion" not in q_general.lower()
+
+
+def test_validate_broll_frame(tmp_path: Path):
+    from src.broll_engine import validate_broll_frame
+
+    # 1. Black video
+    black_video = tmp_path / "black.mp4"
+    cmd_black = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=320x240:d=1:r=30",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        str(black_video),
+    ]
+    subprocess.run(cmd_black, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    is_valid, reason = validate_broll_frame(black_video)
+    assert not is_valid
+    assert "black" in reason.lower()
+
+    # 2. Rich visual video with edges and color
+    rich_video = tmp_path / "rich.mp4"
+    cmd_rich = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=30",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        str(rich_video),
+    ]
+    subprocess.run(cmd_rich, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    is_valid, reason = validate_broll_frame(rich_video)
+    assert is_valid
+    assert reason == "OK"
+

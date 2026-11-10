@@ -124,10 +124,15 @@ CRITICAL EDITING PRINCIPLES:
    - Remove long thinking pauses, filler words, and small talk. Use multiple tight segments if needed.
 3. DURATION:
    - Total clip duration MUST be strictly between 30 and 60 seconds (sum of all segments).
-4. VISUAL SCENE DIRECTION:
+4. STRICT CONTEXTUAL B-ROLL DIRECTIVES (No generic stock, real archives):
    - Break the clip down into scenes every 2 to 5 seconds.
    - Layouts: 'splitscreen', 'full_speaker', 'full_broll'.
-   - search_query: 2-4 visceral, cinematic English keywords (e.g. "military helicopter extraction night", "dry aged steak cellar", "laboratory microbes zoom"). NEVER use names of podcast hosts.
+   - search_query: 1-2 focused, visual English search queries directly targeting the REAL subjects being discussed:
+     * When real personalities are mentioned (e.g. "Trump", "Elon Musk", "Joe Rogan", "Bobby Kennedy / RFK", "Obamacare"):
+       MANDATORY: search real, rare archive or inside material (e.g. "Donald Trump rare oval office footage", "Elon Musk 1990s retro interview archive", "Robert F Kennedy Jr speech archive raw", "White house press briefing historic raw footage").
+     * When institutions or topics are mentioned: search real footage (e.g. "American school lunch cafeteria children raw footage", "pharmaceutical lab factory inspection archive", "corporate lobbying congress hearing archive raw").
+     * NEVER use generic stock prompts (STRICTLY FORBIDDEN: 'steak', 'meat', 'gold vault', 'matrix code', 'smoke').
+     * Avoid literal interpretations of idioms or metaphors (e.g. 'having beef' is NOT meat; 'cash cow' is NOT cows).
 
 OUTPUT SCHEMA (Return ONLY valid JSON):
 [
@@ -146,7 +151,7 @@ OUTPUT SCHEMA (Return ONLY valid JSON):
         "start": 0.0,
         "end": 3.5,
         "layout": "splitscreen",
-        "search_query": "military helicopter extraction night"
+        "search_query": "Donald Trump rare oval office footage"
       },
       {
         "start": 3.5,
@@ -158,7 +163,7 @@ OUTPUT SCHEMA (Return ONLY valid JSON):
         "start": 7.0,
         "end": 11.0,
         "layout": "full_broll",
-        "search_query": "secret government documents burning"
+        "search_query": "corporate lobbying congress hearing archive raw"
       }
     ]
   }
@@ -187,37 +192,78 @@ def _load_transcript_data(
     return full_text, words
 
 
+def extract_contextual_broll_query(
+    slice_text: str,
+    clip_words: list[dict[str, Any]] | None = None,
+) -> str:
+    """
+    Generates 1-2 focused, visual English search queries directly targeting REAL subjects:
+    - Real personalities (Trump, Elon Musk, Joe Rogan, RFK Jr, Obama) -> Rare archive footage.
+    - Real institutions & public interest topics (White House, Congress, School Lunch, Food Chemistry Lab).
+    - NEVER uses generic stock prompts ('steak', 'gold vault', 'meat', 'smoke').
+    - Avoids literal interpretations of idioms/metaphors.
+    """
+    text_lower = slice_text.lower()
+
+    # 1. Real Personalities & Political Figures (Highest priority)
+    if any(k in text_lower for k in ["trump", "donald"]):
+        return "Donald Trump rare oval office footage"
+    if any(k in text_lower for k in ["elon", "musk"]):
+        return "Elon Musk early archive raw footage"
+    if any(k in text_lower for k in ["rogan", "joe rogan"]):
+        return "Joe Rogan studio rare interview archive"
+    if any(k in text_lower for k in ["kennedy", "bobby", "rfk"]):
+        return "Robert F Kennedy Jr speech archive raw"
+    if any(k in text_lower for k in ["obamacare", "obama"]):
+        return "Barack Obama healthcare signing historic raw"
+    if any(k in text_lower for k in ["susie", "wiles", "brooke", "rollins"]):
+        return "White House administration briefing historic footage"
+
+    # 2. Real Institutions & Contextual Subjects
+    if any(k in text_lower for k in ["white house", "oval office", "president"]):
+        return "White house oval office rare archive footage"
+    if any(k in text_lower for k in ["congress", "capitol", "senate", "constituen"]):
+        return "US Capitol congress chamber raw footage"
+    if any(k in text_lower for k in ["school", "lunch", "breakfast", "donut", "pastr", "child", "kid"]):
+        return "American school lunch cafeteria children raw footage"
+    if any(k in text_lower for k in ["ultra-process", "processed food", "coca", "oreo", "mondelez", "sweetener", "dye", "chemic"]):
+        return "food chemistry lab factory inspection archive"
+    if any(k in text_lower for k in ["lobby", "special interest", "fda", "usda", "regulat"]):
+        return "corporate lobbying congress hearing archive raw"
+    if any(k in text_lower for k in ["healthcare", "insurance", "hospital", "premium", "doctor", "medicine"]):
+        return "hospital healthcare system archival footage"
+    if any(k in text_lower for k in ["wall street", "stock", "econom", "billion", "wealth", "inflation"]):
+        return "Wall Street stock exchange trading floor historic footage"
+    if any(k in text_lower for k in ["ai", "artificial intelligence", "robot", "supercomputer", "algorithm"]):
+        return "supercomputer datacenter artificial intelligence raw footage"
+    if any(k in text_lower for k in ["military", "pentagon", "defense", "army"]):
+        return "Pentagon military briefing archival footage"
+    if any(k in text_lower for k in ["classified", "intelligence", "cia", "fbi"]):
+        return "FBI intelligence headquarters rare archival footage"
+
+    # 3. Broader clip context fallback
+    if clip_words:
+        broad_text = " ".join(w["word"].lower() for w in clip_words)
+        if any(k in broad_text for k in ["food", "school", "diet", "fda", "usda"]):
+            return "American school lunch cafeteria children raw footage"
+        if any(k in broad_text for k in ["healthcare", "insurance", "obamacare"]):
+            return "hospital healthcare system archival footage"
+        if any(k in broad_text for k in ["trump", "white house", "president", "policy"]):
+            return "White house oval office rare archive footage"
+
+    return "US Capitol congress chamber raw footage"
+
+
 def generate_heuristic_scenes(
     clip_duration: float,
     clip_words: list[dict[str, Any]],
 ) -> list[SceneCut]:
     """
     Creates visual director plan with scene cuts every 2-5 seconds.
-    Generates 2-4 cinematic visual English keywords per B-roll scene.
+    Generates strictly contextual, real archive search queries per B-roll scene.
     """
     scenes: list[SceneCut] = []
     current_time = 0.0
-
-    KEYWORD_QUERIES = [
-        (["military", "army", "war", "weapon", "defense", "helicopter"], "military helicopter extraction night"),
-        (["money", "billion", "rich", "dollar", "wealth", "gold", "bank"], "money vault gold bullion cinematic"),
-        (["meat", "food", "eat", "diet", "steak", "protein"], "dry aged steak cellar"),
-        (["doctor", "pharma", "medicine", "pill", "drug", "fda", "health"], "laboratory microbes microscope zoom"),
-        (["secret", "cia", "fbi", "government", "classified", "state"], "secret government documents burning"),
-        (["matrix", "ai", "robot", "tech", "code", "computer"], "cyberpunk neon city aerial"),
-        (["police", "crime", "illegal", "jail", "arrest", "court"], "police siren lights dark street"),
-        (["space", "alien", "ufo", "mars", "galaxy", "stars"], "deep space galaxy nebula stars"),
-        (["lie", "truth", "media", "fake", "news", "television"], "cinematic smoke dark spotlight"),
-    ]
-
-    FALLBACK_QUERIES = [
-        "military helicopter extraction night",
-        "dry aged steak cellar",
-        "laboratory microbes zoom",
-        "money vault gold bullion cinematic",
-        "cyberpunk neon city aerial",
-        "police siren lights dark street",
-    ]
 
     layout_cycle: list[LayoutType] = [
         "splitscreen",
@@ -246,16 +292,11 @@ def generate_heuristic_scenes(
         search_query = ""
         if layout in ("full_broll", "splitscreen"):
             slice_text = " ".join(
-                w["word"].lower()
+                w["word"]
                 for w in clip_words
                 if current_time <= w.get("start", 0) <= scene_end
             )
-            matched = ""
-            for keywords, query in KEYWORD_QUERIES:
-                if any(kw in slice_text for kw in keywords):
-                    matched = query
-                    break
-            search_query = matched or FALLBACK_QUERIES[cycle_idx % len(FALLBACK_QUERIES)]
+            search_query = extract_contextual_broll_query(slice_text, clip_words)
 
         scenes.append(
             SceneCut(
