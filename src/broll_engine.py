@@ -408,22 +408,204 @@ def generate_cinematic_fallback(
     return output_path
 
 
+# Semantic keyword clusters for direct noun verification
+TOPIC_KEYWORD_CLUSTERS = {
+    "school_lunch": {
+        "query_tokens": {"school", "lunch", "cafeteria", "tray"},
+        "spoken_tokens": {"school", "lunch", "cafeteria", "donut", "donuts", "pastry", "pastries", "breakfast", "kid", "kids", "child", "children", "tray", "food", "eat", "meal", "meals"},
+    },
+    "pharma_drugs": {
+        "query_tokens": {"pill", "pills", "blister", "macro", "pharmaceutical", "pharma", "chemical", "tubes", "laboratory"},
+        "spoken_tokens": {"pharmaceutical", "pharma", "drug", "drugs", "medicine", "medicines", "pill", "pills", "chemical", "chemicals", "vaccine", "vaccines", "medication", "lab", "prescription"},
+    },
+    "processed_food": {
+        "query_tokens": {"processed", "junk", "supermarket", "aisle"},
+        "spoken_tokens": {"processed", "ultra-processed", "junk", "sugar", "fructose", "syrup", "soda", "cereal", "food", "ingredients", "dye", "dyes", "chemicals"},
+    },
+    "healthcare_system": {
+        "query_tokens": {"hospital", "icu", "doctor", "insurance", "claim"},
+        "spoken_tokens": {"hospital", "doctor", "doctors", "icu", "patient", "nurse", "insurance", "premium", "deductible", "healthcare", "bills", "costs"},
+    },
+    "congress_politics": {
+        "query_tokens": {"capitol", "congress", "chamber", "lobbying", "hearing"},
+        "spoken_tokens": {"congress", "senate", "capitol", "senator", "representative", "hearing", "lobby", "lobbyist", "bill", "vote", "campaign", "pac", "politician"},
+    },
+    "white_house": {
+        "query_tokens": {"white", "house", "oval", "office"},
+        "spoken_tokens": {"white", "house", "oval", "office", "president", "trump", "obama", "administration", "executive"},
+    },
+    "money_finance": {
+        "query_tokens": {"banknotes", "counting", "machine", "dollar", "cash"},
+        "spoken_tokens": {"money", "billion", "trillion", "dollar", "dollars", "wealth", "tax", "taxes", "cash", "bank", "pay", "paid", "funding"},
+    },
+    "legal_court": {
+        "query_tokens": {"court", "courtroom", "gavel", "trial"},
+        "spoken_tokens": {"court", "judge", "trial", "lawsuit", "illegal", "gavel", "attorney", "legal", "guilty", "crime"},
+    },
+    "supercomputer_ai": {
+        "query_tokens": {"datacenter", "server", "racks"},
+        "spoken_tokens": {"computer", "supercomputer", "ai", "artificial", "intelligence", "server", "datacenter", "algorithm", "tech"},
+    },
+    "military_pentagon": {
+        "query_tokens": {"pentagon", "military", "briefing"},
+        "spoken_tokens": {"military", "pentagon", "army", "defense", "war", "weapons", "general", "troops"},
+    },
+}
+
+
+def check_topic_guard(
+    scene: SceneCut,
+    spoken_text: str,
+) -> tuple[bool, str]:
+    """
+    Strict Topic Guard:
+    Cross-checks the scene's search query against spoken audio nouns/entities in that 2-5s segment.
+    If the search query does not directly match the spoken words, rejects B-roll.
+    "Besser kein B-Roll als unpassendes B-Roll."
+    """
+    if not scene.search_query:
+        return False, "Search query is empty"
+
+    if not spoken_text or not spoken_text.strip():
+        return False, "No spoken words in audio segment"
+
+    spoken_tokens = set(re.findall(r"\b[a-zA-Z]{3,}\b", spoken_text.lower()))
+    query_tokens = set(re.findall(r"\b[a-zA-Z]{3,}\b", scene.search_query.lower()))
+
+    # Direct token intersection (e.g. "trump", "musk", "pepsi", "pfizer", "lunch", "pills", "hospital")
+    STOP_QUERY_TOKENS = {
+        "rare", "raw", "footage", "archive", "archival", "interview", "official",
+        "transparent", "png", "logo", "building", "corporate", "headquarters",
+        "scene", "hd", "video", "4k", "dramatic", "cinematic", "real"
+    }
+    meaningful_query_tokens = query_tokens - STOP_QUERY_TOKENS
+
+    if meaningful_query_tokens.intersection(spoken_tokens):
+        return True, "Direct entity/noun overlap"
+
+    # Check semantic topic clusters
+    for cluster_name, cluster_data in TOPIC_KEYWORD_CLUSTERS.items():
+        if cluster_data["query_tokens"].intersection(query_tokens):
+            if cluster_data["spoken_tokens"].intersection(spoken_tokens):
+                return True, f"Cluster match: {cluster_name}"
+
+    return False, f"Query '{scene.search_query}' has no noun overlap with spoken segment ('{spoken_text[:40]}...')"
+
+
+def render_brand_logo_plate(
+    brand_query: str,
+    output_path: Path,
+    duration: float,
+    width: int = 1080,
+    height: int = 960,
+) -> Path:
+    """
+    Renders Category A Priority 1 clean brand logo / badge plate:
+    1. Generates clean high-res emblem plate using Pillow
+    2. Outputs smooth MP4 with subtle Ken-Burns zoom (1.0x -> 1.05x).
+    """
+    from PIL import Image, ImageDraw
+    from .subtitles import get_subtitle_font
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_png = output_path.with_suffix(".png")
+
+    brand_name = brand_query.replace("official company logo transparent png", "")
+    brand_name = brand_name.replace("logo transparent png", "").replace("company logo", "").replace("logo", "")
+    brand_name = brand_name.strip().upper() or "BRAND"
+
+    img = Image.new("RGBA", (width, height), (15, 20, 26, 255))
+    draw = ImageDraw.Draw(img)
+
+    badge_w, badge_h = int(width * 0.75), int(height * 0.48)
+    bx1 = (width - badge_w) // 2
+    by1 = (height - badge_h) // 2
+    bx2 = bx1 + badge_w
+    by2 = by1 + badge_h
+
+    draw.rounded_rectangle([bx1, by1, bx2, by2], radius=24, fill=(24, 32, 42, 255), outline=(56, 72, 92, 255), width=3)
+
+    font = get_subtitle_font(size=min(72, max(28, int(badge_w / (len(brand_name) * 0.75 + 2)))))
+    bbox = draw.textbbox((0, 0), brand_name, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx = (width - tw) // 2 - bbox[0]
+    ty = (height - th) // 2 - bbox[1]
+
+    draw.text((tx, ty), brand_name, font=font, fill=(255, 255, 255, 255))
+
+    label = "OFFICIAL ENTITY"
+    font_sub = get_subtitle_font(size=24)
+    bbox_sub = draw.textbbox((0, 0), label, font=font_sub)
+    sw = bbox_sub[2] - bbox_sub[0]
+    draw.text(((width - sw) // 2 - bbox_sub[0], by1 + 22), label, font=font_sub, fill=(130, 160, 195, 255))
+
+    img.save(temp_png)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", str(temp_png),
+        "-t", str(duration),
+        "-vf", f"scale={width}:{height},zoompan=z='min(zoom+0.0005,1.06)':d={int(duration*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps=30",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception:
+        cmd_simple = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", str(temp_png),
+            "-t", str(duration),
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            "-an",
+            str(output_path),
+        ]
+        subprocess.run(cmd_simple, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    if temp_png.exists():
+        temp_png.unlink()
+
+    return output_path
+
+
 def source_broll_for_clip(
     clip: ClipProposal,
     temp_dir: Path | str = Path("temp"),
+    word_timestamps_file: Path | str = Path("temp/word_timestamps.json"),
 ) -> list[SceneCut]:
     """
     Sourcing pipeline for each SceneCut in a ClipProposal:
-    1. Check manual user drop in input/broll/
-    2. Contextual real archive footage search via YouTube (top-3 candidates)
-    3. Logo & intro protection (minimum offset >= 10s)
-    4. Visual quality gate validation (rejects black frames, flat slides, static logos)
-    5. Deduplication (No-Repeat-Garantie: no asset repeats within a 30-60s short)
-    6. Procedural fallback plate if all candidates fail
+    1. Strict Topic Guard: cross-checks search query with spoken nouns in the scene interval.
+       Reverts to 'full_speaker' if query does not match spoken audio.
+    2. Category A Priority 1: Brand logo / badge rendering.
+    3. Category A Priority 2 & Category B: Contextual real archive footage search via YouTube (top-3 candidates).
+    4. Logo & intro protection (minimum offset >= 10s).
+    5. Visual quality gate validation (rejects black frames, flat slides, static logos).
+    6. Deduplication (No-Repeat-Garantie: no asset repeats within a 30-60s short).
+    7. Topic Guard fallback: reverts to 'full_speaker' if footage cannot be validated.
     """
+    import json
+    from .subtitles import map_words_to_clip_timeline
+
     temp_dir = Path(temp_dir)
     broll_cache = temp_dir / "broll" / f"clip_{clip.clip_id}"
     broll_cache.mkdir(parents=True, exist_ok=True)
+
+    # Load transcript words if available to enforce Strict Topic Guard
+    local_words: list[dict[str, Any]] = []
+    word_path = Path(word_timestamps_file)
+    if word_path.exists():
+        try:
+            with open(word_path, "r", encoding="utf-8") as f:
+                raw_words = json.load(f)
+            local_words = map_words_to_clip_timeline(raw_words, clip.segments)
+        except Exception as exc:
+            logger.debug(f"Could not load word timestamps for Topic Guard: {exc}")
 
     # Deduplication tracking: list/set of all B-roll asset paths used in this clip
     used_asset_paths: set[str] = set()
@@ -435,8 +617,44 @@ def source_broll_for_clip(
         target_w = 1080
         target_h = 960 if scene.layout == "splitscreen" else 1920
 
-        query = scene.search_query or "US Capitol congress chamber raw footage"
+        # Strict Topic Guard verification
+        spoken_text = ""
+        if local_words:
+            scene_words = [
+                w for w in local_words
+                if w.get("start", 0) <= scene.end and w.get("end", 0) >= scene.start
+            ]
+            spoken_text = " ".join(w.get("word", "") for w in scene_words)
+
+        is_topic_valid, guard_reason = check_topic_guard(scene, spoken_text)
+        if not is_topic_valid:
+            logger.info(
+                f"Strict Topic Guard: Scene {idx} [{scene.start:.1f}s - {scene.end:.1f}s] rejected B-roll query '{scene.search_query}': {guard_reason}. "
+                f"Reverting layout to 'full_speaker'."
+            )
+            scene.layout = "full_speaker"
+            scene.search_query = ""
+            scene.broll_asset_path = None
+            continue
+
+        query = scene.search_query
         slug = sanitize_query(query).replace(" ", "_")[:25] or "scene"
+
+        # Category A Priority 1: Clean Brand Logo Plate
+        if "logo" in query.lower() or "transparent png" in query.lower():
+            logo_plate = broll_cache / f"scene_{idx}_{slug}_logo.mp4"
+            resolved_logo = str(logo_plate.resolve())
+            if resolved_logo not in used_asset_paths:
+                render_brand_logo_plate(
+                    brand_query=query,
+                    output_path=logo_plate,
+                    duration=scene.duration,
+                    width=target_w,
+                    height=target_h,
+                )
+                scene.broll_asset_path = resolved_logo
+                used_asset_paths.add(resolved_logo)
+                continue
 
         # 1. Check manual drop in input/broll (respecting deduplication)
         manual_asset = check_manual_broll_drop(query)
@@ -472,7 +690,7 @@ def source_broll_for_clip(
             final_plate = broll_cache / f"scene_{idx}_{slug}_c{cand_idx}.mp4"
             resolved_plate = str(final_plate.resolve())
 
-            # Check if this candidate was already downloaded & processed and not yet used in this clip
+            # Check if this candidate was already processed and not yet used in this clip
             if final_plate.exists() and final_plate.stat().st_size > 5000 and resolved_plate not in used_asset_paths:
                 is_valid, _ = validate_broll_frame(final_plate)
                 if is_valid:
@@ -516,18 +734,13 @@ def source_broll_for_clip(
         if found_valid:
             continue
 
-        # 3. Fallback: Dynamic motion texture (guaranteed unique path per scene index)
-        final_plate = broll_cache / f"scene_{idx}_{slug}_fallback.mp4"
-        logger.info(f"Generating fallback motion texture for '{query}'...")
-        generate_cinematic_fallback(
-            output_path=final_plate,
-            duration=scene.duration,
-            width=target_w,
-            height=target_h,
-            query=f"{query}_{idx}",
+        # 3. Topic Guard fallback: Revert to full_speaker instead of forcing unrelated footage
+        logger.info(
+            f"Strict Topic Guard: No quality-gated footage found for '{query}'. "
+            f"Reverting scene {idx} to 'full_speaker' (Better no B-roll than unfitting B-roll)."
         )
-        resolved_plate = str(final_plate.resolve())
-        scene.broll_asset_path = resolved_plate
-        used_asset_paths.add(resolved_plate)
+        scene.layout = "full_speaker"
+        scene.search_query = ""
+        scene.broll_asset_path = None
 
     return clip.scenes

@@ -24,8 +24,12 @@ from .selector import ClipProposal, Segment
 
 logger = logging.getLogger("uncensored_talking.subtitles")
 
-# Search paths for bold typography (Outfit-Black preferred, Satoshi-Black, Arial Black fallback)
+# Search paths for bold typography (Excon-Black/Bold preferred, Outfit-Black, Arial Black fallback)
 FONT_CANDIDATES = [
+    Path("assets/fonts/Excon-Black.otf"),
+    Path("assets/fonts/Excon-Black.ttf"),
+    Path("assets/fonts/Excon-Bold.otf"),
+    Path("assets/fonts/Excon-Bold.ttf"),
     Path("assets/fonts/Outfit-Black.ttf"),
     Path("assets/fonts/Satoshi-Black.ttf"),
     Path("/usr/share/fonts/truetype/msttcorefonts/Arial_Black.ttf"),
@@ -56,8 +60,8 @@ def format_ass_timestamp(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}.{centis:02d}"
 
 
-def get_subtitle_font(size: int = 70) -> ImageFont.FreeTypeFont:
-    """Finds and loads the best available bold typography font (Outfit-Black preferred)."""
+def get_subtitle_font(size: int = 63) -> ImageFont.FreeTypeFont:
+    """Finds and loads the best available bold typography font (Excon-Black preferred)."""
     for font_path in FONT_CANDIDATES:
         if font_path.exists():
             try:
@@ -227,15 +231,15 @@ def render_gradient_subtitle_png(
     output_png_path: Path,
     width: int = 1080,
     height: int = 1920,
-    font_size: int = 70,
+    font_size: int = 63,
     stroke_width: int = 8,
     top_color: tuple[int, int, int] = (255, 221, 0),  # #FFDD00 Yellow
     bot_color: tuple[int, int, int] = (255, 119, 0),  # #FF7700 Warm-Orange
 ) -> Path:
     """
     Renders a single subtitle chunk as a transparent 1080x1920 PNG with:
-    - Font: Outfit-Black (UPPERCASE, no punctuation).
-    - Compact sizing (~15-20% reduced: 70px) and clean 8px black outer contour.
+    - Font: Excon-Black (UPPERCASE, no punctuation).
+    - Compact sizing (reduced ~10%: 63px) and clean 7-8px black outer contour.
     - Vertical linear gradient (Yellow -> Warm-Orange).
     - Exact center alignment (X: 540, Y: 960).
     """

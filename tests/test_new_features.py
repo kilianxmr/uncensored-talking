@@ -70,6 +70,14 @@ def test_render_gradient_subtitle_png(tmp_path: Path):
     assert np.max(center_region[:, :, 3]) == 255
 
 
+def test_excon_font_loading():
+    from src.subtitles import get_subtitle_font
+    font = get_subtitle_font(size=63)
+    name, style = font.getname()
+    assert "Excon" in name or "Outfit" in name
+    assert style in ("Black", "Bold")
+
+
 def test_find_visual_focal_point(tmp_path: Path):
     img_path = tmp_path / "focal_test.jpg"
     # Create image with high contrast dot in bottom-right
@@ -164,6 +172,7 @@ def test_anti_stretch_rendering_and_png_overlay(tmp_path: Path):
 def test_contextual_broll_queries():
     from src.selector import extract_contextual_broll_query
 
+    # Category A: Named Persons
     q_trump = extract_contextual_broll_query("and President Trump said we must reform this")
     assert "Trump" in q_trump
     assert "rare oval office" in q_trump
@@ -171,16 +180,24 @@ def test_contextual_broll_queries():
     q_musk = extract_contextual_broll_query("Elon Musk thinks AI will replace work soon")
     assert "Elon Musk" in q_musk
 
+    q_terry = extract_contextual_broll_query("Terry McAuliffe was the governor at that time")
+    assert "Terry McAuliffe" in q_terry
+
+    # Category A: Concrete Brands (Logos)
+    q_pepsi = extract_contextual_broll_query("Pepsi and Coca-Cola spend millions lobbying")
+    assert "Pepsi" in q_pepsi
+    assert "logo" in q_pepsi
+
+    # Category B: Direct Nouns
     q_lunch = extract_contextual_broll_query("school lunch is full of donuts and pastries for kids")
-    assert "school lunch" in q_lunch
+    assert "cafeteria lunch tray" in q_lunch
 
-    q_obama = extract_contextual_broll_query("Obamacare exploded insurance costs")
-    assert "Obama" in q_obama
+    q_pharma = extract_contextual_broll_query("pharmaceutical companies sell expensive pills")
+    assert "pills blister pack macro" in q_pharma
 
-    # Metaphor avoidance: 'money' or 'beef' without context does not yield steak or gold bullion
+    # Strict Topic Guard: Abstract or unrelated talk yields empty string (NO forced B-roll)
     q_general = extract_contextual_broll_query("they talked about the rules of the game")
-    assert "steak" not in q_general.lower()
-    assert "gold bullion" not in q_general.lower()
+    assert q_general == "", "Unrelated talk must return empty string to avoid wrong B-roll"
 
 
 def test_validate_broll_frame(tmp_path: Path):
@@ -211,4 +228,73 @@ def test_validate_broll_frame(tmp_path: Path):
     is_valid, reason = validate_broll_frame(rich_video)
     assert is_valid
     assert reason == "OK"
+
+
+def test_no_ambiguity_hook_rules():
+    from src.selector import find_context_anchor_start, enforce_no_ambiguity_hook, ClipProposal, Segment
+
+    words = [
+        {"word": "Wait,", "start": 10.0, "end": 10.4},
+        {"word": "so", "start": 10.45, "end": 10.6},
+        {"word": "you're", "start": 10.65, "end": 10.8},
+        {"word": "saying", "start": 10.85, "end": 11.2},
+        {"word": "Terry", "start": 11.25, "end": 11.6},
+        {"word": "is", "start": 11.65, "end": 11.8},
+        {"word": "taking", "start": 11.85, "end": 12.2},
+        {"word": "money?", "start": 12.25, "end": 12.7},
+        {"word": "Yeah,", "start": 13.0, "end": 13.3},
+        {"word": "it's", "start": 13.35, "end": 13.6},
+        {"word": "based", "start": 13.65, "end": 14.0},
+        {"word": "on", "start": 14.05, "end": 14.2},
+        {"word": "a", "start": 14.25, "end": 14.3},
+        {"word": "lie", "start": 14.35, "end": 14.8},
+        {"word": "and", "start": 14.85, "end": 15.0},
+        {"word": "70%", "start": 15.05, "end": 15.6},
+        {"word": "is", "start": 15.65, "end": 15.8},
+        {"word": "toxic", "start": 15.85, "end": 16.3},
+    ]
+
+    # Test 1: Ambiguous start at 13.0s ("Yeah, it's based on...")
+    # Must anchor backwards to the host question at 10.0s ("Wait, so you're saying Terry...")
+    anchored = find_context_anchor_start(words, target_start=13.0)
+    assert anchored == 10.0
+
+    # Test 2: enforce_no_ambiguity_hook adjusts proposal segments and total duration
+    clip = ClipProposal(
+        clip_id=1,
+        title="ambiguous_hook_test",
+        hook="Yeah it's based on a lie",
+        rationale="Testing anchor rule",
+        segments=[Segment(start=13.0, end=45.0)],
+    )
+    fixed_clip = enforce_no_ambiguity_hook(clip, words)
+    assert fixed_clip.segments[0].start == 10.0
+    assert 30.0 <= fixed_clip.total_duration <= 60.0
+    assert "Wait" in fixed_clip.hook or "Terry" in fixed_clip.hook
+
+
+def test_strict_topic_guard():
+    from src.broll_engine import check_topic_guard
+    from src.selector import SceneCut
+
+    # 1. Aligned: school lunch tray with cafeteria words
+    scene_ok = SceneCut(
+        start=0.0,
+        end=3.0,
+        layout="splitscreen",
+        search_query="american high school cafeteria lunch tray",
+    )
+    is_valid, reason = check_topic_guard(scene_ok, spoken_text="they give donuts and pastries for lunch")
+    assert is_valid
+
+    # 2. Misaligned: skyscraper construction workers with school lunch words
+    scene_bad = SceneCut(
+        start=0.0,
+        end=3.0,
+        layout="splitscreen",
+        search_query="construction workers skyscraper high altitude",
+    )
+    is_valid, reason = check_topic_guard(scene_bad, spoken_text="school children eat processed food and pastries")
+    assert not is_valid
+    assert "no noun overlap" in reason.lower() or "rejected" in reason.lower()
 

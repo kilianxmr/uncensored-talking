@@ -117,22 +117,30 @@ Your mission:
 Create explosive, highly shareable 30-60 second vertical shorts from podcast/interview transcripts using NON-LINEAR EDITING.
 
 CRITICAL EDITING PRINCIPLES:
-1. NON-LINEAR HOOK MANDATE:
-   - The first 3 to 5 seconds of the clip MUST be the single most controversial, shocking, or taboo sentence of the discussion (even if it was spoken at minute 15 or 45).
-   - Immediately hard-cut from this hook to the reaction or provocative question (e.g. Joe Rogan: "Wait, are you serious?!"), then continue the core explanation.
-2. TIGHT PACING & JUMP CUTS:
-   - Remove long thinking pauses, filler words, and small talk. Use multiple tight segments if needed.
+1. THE "NO-AMBIGUITY"-HOOK MANDATE (MANDATORY CONTEXT ANCHOR):
+   - A clip must NEVER start with ambiguous words or pronoun chains ("It's based on...", "He said...", "They do...", "So what they do...", "And he did..."). The audience must immediately understand WHO or WHAT is being discussed!
+   - MANDATORY CONTEXT ANCHOR:
+     * Search backwards for the conversation partner's (e.g. Joe Rogan) question or interjection establishing the subject:
+       Example: "Wait, so you're saying Terry is taking money from them?" -> "Yeah, it's based on a lie..."
+     * If no question exists: The cut MUST start at the exact point where the target person or entity is explicitly named with their FULL NAME (e.g. "Donald Trump", "Terry McAuliffe", "Big Pharma", "Robert F Kennedy Jr", "Monsanto", "Coca-Cola").
+2. LOGICAL STORY ARC (30–60s):
+   - Hook (0–4s): Problem / accusation / provocative question with CLEAR naming of actors.
+   - Proof / Argumentation (4–40s): Fast, tight chain of facts without filler or small talk.
+   - Climax / Schlusspointe (40–60s): Shocking conclusion / punchline (e.g. "70% of a child's diet is ultra-processed food").
 3. DURATION:
    - Total clip duration MUST be strictly between 30 and 60 seconds (sum of all segments).
-4. STRICT CONTEXTUAL B-ROLL DIRECTIVES (No generic stock, real archives):
+4. STRICT TWO-CATEGORY VISUAL DIRECTION (Strictly No Metaphors):
    - Break the clip down into scenes every 2 to 5 seconds.
    - Layouts: 'splitscreen', 'full_speaker', 'full_broll'.
-   - search_query: 1-2 focused, visual English search queries directly targeting the REAL subjects being discussed:
-     * When real personalities are mentioned (e.g. "Trump", "Elon Musk", "Joe Rogan", "Bobby Kennedy / RFK", "Obamacare"):
-       MANDATORY: search real, rare archive or inside material (e.g. "Donald Trump rare oval office footage", "Elon Musk 1990s retro interview archive", "Robert F Kennedy Jr speech archive raw", "White house press briefing historic raw footage").
-     * When institutions or topics are mentioned: search real footage (e.g. "American school lunch cafeteria children raw footage", "pharmaceutical lab factory inspection archive", "corporate lobbying congress hearing archive raw").
-     * NEVER use generic stock prompts (STRICTLY FORBIDDEN: 'steak', 'meat', 'gold vault', 'matrix code', 'smoke').
-     * Avoid literal interpretations of idioms or metaphors (e.g. 'having beef' is NOT meat; 'cash cow' is NOT cows).
+   - Category A: Concrete Brands & Entities (Logos / Persons):
+     * Brands (e.g. "Pepsi", "Pfizer", "FDA", "Monsanto", "Coca-Cola") -> search official logo transparent png or corporate headquarters building.
+     * Personalities (e.g. "Donald Trump", "Elon Musk", "Joe Rogan", "Terry McAuliffe", "RFK Jr.") -> search rare interview / archive footage.
+   - Category B: Stereotypical, Universal B-Roll (Direct Nouns):
+     * "pharmaceutical companies" -> "pills blister pack macro" or "laboratory chemical test tubes".
+     * "school lunch" -> "american high school cafeteria lunch tray".
+     * "processed food" -> "ultra processed junk food supermarket aisle".
+   - STRICTLY FORBIDDEN: Abstract historical metaphors (no construction workers on skyscrapers for lunch or budget!).
+   - STRICT TOPIC GUARD: If a 2-5s slice does NOT contain a direct noun or entity, set layout to 'full_speaker'. Never force unfitting B-roll!
 
 OUTPUT SCHEMA (Return ONLY valid JSON):
 [
@@ -162,8 +170,8 @@ OUTPUT SCHEMA (Return ONLY valid JSON):
       {
         "start": 7.0,
         "end": 11.0,
-        "layout": "full_broll",
-        "search_query": "corporate lobbying congress hearing archive raw"
+        "layout": "splitscreen",
+        "search_query": "american high school cafeteria lunch tray"
       }
     ]
   }
@@ -192,66 +200,96 @@ def _load_transcript_data(
     return full_text, words
 
 
+# Category A: Concrete Brands & Entities (Logos / Persons)
+BRAND_ENTITIES = {
+    "pepsi": "Pepsi official company logo transparent png",
+    "coca-cola": "Coca-Cola company logo transparent png",
+    "coca": "Coca-Cola company logo transparent png",
+    "coke": "Coca-Cola company logo transparent png",
+    "pfizer": "Pfizer pharmaceutical logo transparent png",
+    "moderna": "Moderna company logo transparent png",
+    "mondelez": "Mondelez International company logo transparent png",
+    "kellogg": "Kellogg brand logo transparent png",
+    "kraft": "Kraft Heinz logo transparent png",
+    "nestle": "Nestle company logo transparent png",
+    "mcdonald": "McDonald's golden arches logo transparent png",
+    "monsanto": "Monsanto agricultural logo transparent png",
+    "blackrock": "BlackRock corporate headquarters building",
+    "vanguard": "Vanguard corporate headquarters building",
+    "fda": "Food and Drug Administration FDA official seal logo",
+    "usda": "United States Department of Agriculture USDA seal logo",
+    "cdc": "Centers for Disease Control CDC seal logo",
+    "who": "World Health Organization WHO official emblem",
+}
+
+PERSON_ENTITIES = {
+    "trump": "Donald Trump rare oval office footage",
+    "donald": "Donald Trump rare oval office footage",
+    "rogan": "Joe Rogan studio rare interview archive",
+    "joe rogan": "Joe Rogan studio rare interview archive",
+    "elon": "Elon Musk early archive raw footage",
+    "musk": "Elon Musk early archive raw footage",
+    "kennedy": "Robert F Kennedy Jr speech archive raw",
+    "bobby": "Robert F Kennedy Jr speech archive raw",
+    "rfk": "Robert F Kennedy Jr speech archive raw",
+    "obama": "Barack Obama healthcare signing historic raw",
+    "obamacare": "Barack Obama healthcare signing historic raw",
+    "mcauliffe": "Terry McAuliffe rare political interview archive",
+    "terry": "Terry McAuliffe rare political interview archive",
+    "fauci": "Anthony Fauci press briefing archive raw",
+    "gates": "Bill Gates early archive interview raw",
+    "susie wiles": "White House administration briefing historic footage",
+}
+
+# Category B: Stereotypical, Universal B-Roll (Direct Nouns)
+DIRECT_NOUN_QUERIES = [
+    (["pharmaceutical", "pharma", "drug", "drugs", "medicine", "pill", "pills", "medication", "capsule", "vaccin"], "pills blister pack macro"),
+    (["chemical", "chemicals", "test tube", "microscope", "laboratory", "lab"], "laboratory chemical test tubes"),
+    (["school lunch", "lunch tray", "cafeteria", "cafeteria lunch", "donut", "pastry", "breakfast"], "american high school cafeteria lunch tray"),
+    (["ultra-process", "processed food", "junk food", "sugar", "high fructose", "corn syrup", "soda", "cereal"], "ultra processed junk food supermarket aisle"),
+    (["hospital", "doctor", "doctors", "icu", "patient", "nurse", "clinic"], "hospital ICU intensive care corridor doctor"),
+    (["insurance", "premium", "deductible", "healthcare system"], "health insurance claim paperwork medical"),
+    (["congress", "senate", "capitol", "representative", "senator", "legislator"], "US Capitol congress chamber raw footage"),
+    (["lobbying", "lobbyist", "special interest", "campaign contribution", "pac"], "corporate lobbying congress hearing archive raw"),
+    (["white house", "oval office", "president", "executive order"], "White house oval office rare archive footage"),
+    (["money", "billion", "trillion", "dollar", "wealth", "tax", "taxes", "cash", "bank"], "US dollar cash banknotes counting machine"),
+    (["court", "trial", "judge", "illegal", "lawsuit", "gavel"], "supreme court courtroom gavel legal proceeding"),
+    (["supercomputer", "artificial intelligence", "datacenter", "algorithm", "server"], "datacenter server racks flashing led cables"),
+    (["pentagon", "military", "army", "defense contractor", "weapon"], "Pentagon military briefing archival footage"),
+]
+
+
 def extract_contextual_broll_query(
     slice_text: str,
     clip_words: list[dict[str, Any]] | None = None,
 ) -> str:
     """
-    Generates 1-2 focused, visual English search queries directly targeting REAL subjects:
-    - Real personalities (Trump, Elon Musk, Joe Rogan, RFK Jr, Obama) -> Rare archive footage.
-    - Real institutions & public interest topics (White House, Congress, School Lunch, Food Chemistry Lab).
-    - NEVER uses generic stock prompts ('steak', 'gold vault', 'meat', 'smoke').
-    - Avoids literal interpretations of idioms/metaphors.
+    Two-Category Entity & Keyword Mapping:
+    - Category A: Concrete Brands & Entities (Logos / Persons)
+    - Category B: Stereotypical, Universal B-Roll (Direct Nouns)
+    - Strict Topic Guard: Returns "" if no concrete noun/entity is found in slice_text.
+      (Never force unrelated B-roll like skyscrapers for school lunch!)
     """
     text_lower = slice_text.lower()
 
-    # 1. Real Personalities & Political Figures (Highest priority)
-    if any(k in text_lower for k in ["trump", "donald"]):
-        return "Donald Trump rare oval office footage"
-    if any(k in text_lower for k in ["elon", "musk"]):
-        return "Elon Musk early archive raw footage"
-    if any(k in text_lower for k in ["rogan", "joe rogan"]):
-        return "Joe Rogan studio rare interview archive"
-    if any(k in text_lower for k in ["kennedy", "bobby", "rfk"]):
-        return "Robert F Kennedy Jr speech archive raw"
-    if any(k in text_lower for k in ["obamacare", "obama"]):
-        return "Barack Obama healthcare signing historic raw"
-    if any(k in text_lower for k in ["susie", "wiles", "brooke", "rollins"]):
-        return "White House administration briefing historic footage"
+    # Category A: Concrete Brands & Logos
+    for brand_kw, query in BRAND_ENTITIES.items():
+        if re.search(r"\b" + re.escape(brand_kw) + r"\b", text_lower):
+            return query
 
-    # 2. Real Institutions & Contextual Subjects
-    if any(k in text_lower for k in ["white house", "oval office", "president"]):
-        return "White house oval office rare archive footage"
-    if any(k in text_lower for k in ["congress", "capitol", "senate", "constituen"]):
-        return "US Capitol congress chamber raw footage"
-    if any(k in text_lower for k in ["school", "lunch", "breakfast", "donut", "pastr", "child", "kid"]):
-        return "American school lunch cafeteria children raw footage"
-    if any(k in text_lower for k in ["ultra-process", "processed food", "coca", "oreo", "mondelez", "sweetener", "dye", "chemic"]):
-        return "food chemistry lab factory inspection archive"
-    if any(k in text_lower for k in ["lobby", "special interest", "fda", "usda", "regulat"]):
-        return "corporate lobbying congress hearing archive raw"
-    if any(k in text_lower for k in ["healthcare", "insurance", "hospital", "premium", "doctor", "medicine"]):
-        return "hospital healthcare system archival footage"
-    if any(k in text_lower for k in ["wall street", "stock", "econom", "billion", "wealth", "inflation"]):
-        return "Wall Street stock exchange trading floor historic footage"
-    if any(k in text_lower for k in ["ai", "artificial intelligence", "robot", "supercomputer", "algorithm"]):
-        return "supercomputer datacenter artificial intelligence raw footage"
-    if any(k in text_lower for k in ["military", "pentagon", "defense", "army"]):
-        return "Pentagon military briefing archival footage"
-    if any(k in text_lower for k in ["classified", "intelligence", "cia", "fbi"]):
-        return "FBI intelligence headquarters rare archival footage"
+    # Category A: Named Persons (Rare Archival Footage)
+    for person_kw, query in PERSON_ENTITIES.items():
+        if re.search(r"\b" + re.escape(person_kw) + r"\b", text_lower):
+            return query
 
-    # 3. Broader clip context fallback
-    if clip_words:
-        broad_text = " ".join(w["word"].lower() for w in clip_words)
-        if any(k in broad_text for k in ["food", "school", "diet", "fda", "usda"]):
-            return "American school lunch cafeteria children raw footage"
-        if any(k in broad_text for k in ["healthcare", "insurance", "obamacare"]):
-            return "hospital healthcare system archival footage"
-        if any(k in broad_text for k in ["trump", "white house", "president", "policy"]):
-            return "White house oval office rare archive footage"
+    # Category B: Stereotypical Universal B-Roll (Direct Nouns)
+    for keywords, query in DIRECT_NOUN_QUERIES:
+        if any(re.search(r"\b" + re.escape(kw) + r"\b", text_lower) for kw in keywords):
+            return query
 
-    return "US Capitol congress chamber raw footage"
+    # Strict Topic Guard: If no concrete entity or direct noun was spoken in this slice,
+    # return empty string so the director keeps full_speaker (face tracking).
+    return ""
 
 
 def generate_heuristic_scenes(
@@ -260,7 +298,8 @@ def generate_heuristic_scenes(
 ) -> list[SceneCut]:
     """
     Creates visual director plan with scene cuts every 2-5 seconds.
-    Generates strictly contextual, real archive search queries per B-roll scene.
+    Enforces Strict Topic Guard: if no concrete entity or direct noun is spoken,
+    layout reverts to 'full_speaker'.
     """
     scenes: list[SceneCut] = []
     current_time = 0.0
@@ -297,6 +336,9 @@ def generate_heuristic_scenes(
                 if current_time <= w.get("start", 0) <= scene_end
             )
             search_query = extract_contextual_broll_query(slice_text, clip_words)
+            if not search_query:
+                # Strict Topic Guard: No forced B-roll without concrete entity/noun
+                layout = "full_speaker"
 
         scenes.append(
             SceneCut(
@@ -409,17 +451,199 @@ TRANSCRIPT:
         if raw_scenes:
             prop.scenes = [SceneCut(**sc) for sc in raw_scenes if "start" in sc and "end" in sc]
 
-        if not prop.scenes:
-            clip_words = [
-                w for w in words
-                if any(s.start <= w["start"] <= s.end for s in prop.segments)
-            ]
-            prop.scenes = generate_heuristic_scenes(prop.total_duration, clip_words)
-
+        # Enforce No-Ambiguity Hook and logical story arc on LLM proposals
+        prop = enforce_no_ambiguity_hook(prop, words)
         proposals.append(prop)
 
-    logger.info(f"LLM generated {len(proposals)} non-linear clip proposals.")
+    logger.info(f"LLM generated {len(proposals)} non-linear clip proposals (No-Ambiguity Hook enforced).")
     return proposals
+
+
+AMBIGUOUS_HOOK_WORDS = {
+    "it", "its", "it's", "he", "hes", "he's", "she", "shes", "she's",
+    "they", "theyre", "they're", "them", "their", "theirs", "this", "that",
+    "these", "those", "and", "but", "so", "because", "yeah", "yes", "well",
+    "or", "which", "like", "what", "then"
+}
+
+KNOWN_ENTITIES = {
+    "trump", "donald", "rogan", "joe", "terry", "mcauliffe", "kennedy", "rfk",
+    "bobby", "obama", "biden", "elon", "musk", "fauci", "gates", "pepsi",
+    "coca", "coke", "pfizer", "moderna", "mondelez", "kellogg", "nestle",
+    "kraft", "mcdonald", "mcdonalds", "monsanto", "blackrock", "vanguard",
+    "fda", "usda", "cdc", "who", "pharma", "congress", "senate", "white house",
+    "school lunch", "processed food", "sugar", "big pharma", "obamacare"
+}
+
+CLIMAX_KEYWORDS = {
+    "percent", "%", "billion", "trillion", "million", "poison", "toxic", "cancer",
+    "corrupt", "illegal", "dead", "death", "kill", "killing", "fake", "scandal",
+    "never", "exposed", "destroy", "disease", "sick", "ultra-processed", "processed"
+}
+
+
+def find_context_anchor_start(
+    words: list[dict[str, Any]],
+    target_start: float,
+    max_lookback: float = 35.0,
+) -> float:
+    """
+    Implements the "No-Ambiguity"-Hook rule:
+    1. A clip must NEVER start with ambiguous pronouns/connectors ("It's based on...", "He said...", "They do...").
+    2. Priority 1: Searches backwards for the Host-Question / Clarification (e.g. Joe Rogan: "Wait, so you're saying Terry...").
+    3. Priority 2: Searches backwards for the sentence where the target entity/person is explicitly named with their full name.
+    """
+    if not words:
+        return target_start
+
+    # Find word index corresponding to target_start
+    start_idx = 0
+    for idx, w in enumerate(words):
+        if w.get("start", 0) >= target_start - 0.05:
+            start_idx = idx
+            break
+
+    # Inspect first 1-3 words
+    first_words = [
+        re.sub(r"[^\w']", "", words[i]["word"].lower())
+        for i in range(start_idx, min(start_idx + 3, len(words)))
+    ]
+
+    is_ambiguous = False
+    if first_words and first_words[0] in AMBIGUOUS_HOOK_WORDS:
+        is_ambiguous = True
+    elif (
+        len(first_words) >= 2
+        and first_words[0] in {"so", "and", "but", "yeah", "yes", "well", "because", "like"}
+        and first_words[1] in AMBIGUOUS_HOOK_WORDS
+    ):
+        is_ambiguous = True
+
+    if not is_ambiguous:
+        return target_start
+
+    min_time = max(0.0, target_start - max_lookback)
+
+    # Priority 1: Search backwards for Host Question / Interjection (ending with '?')
+    q_end_idx = None
+    for i in range(start_idx - 1, -1, -1):
+        if words[i].get("start", 0) < min_time:
+            break
+        raw = words[i].get("word", "")
+        if "?" in raw:
+            q_end_idx = i
+            break
+
+    if q_end_idx is not None:
+        # Trace back to the beginning of this question sentence
+        q_start_idx = 0
+        for j in range(q_end_idx - 1, -1, -1):
+            if words[j].get("start", 0) < min_time:
+                q_start_idx = j + 1
+                break
+            prev_raw = words[j].get("word", "")
+            if any(p in prev_raw for p in [".", "!", "?"]):
+                q_start_idx = j + 1
+                break
+            pause = words[j + 1].get("start", 0) - words[j].get("end", 0)
+            if pause >= 0.8:
+                q_start_idx = j + 1
+                break
+            q_start_idx = j
+
+        anchor_start = words[q_start_idx].get("start", target_start)
+        logger.info(
+            f"No-Ambiguity Hook: Anchored from {target_start:.1f}s backwards to Host Question at {anchor_start:.1f}s "
+            f"('{words[q_start_idx].get('word')}...')"
+        )
+        return anchor_start
+
+    # Priority 2: Search backwards for Named Entity Introduction sentence
+    entity_idx = None
+    for i in range(start_idx - 1, -1, -1):
+        if words[i].get("start", 0) < min_time:
+            break
+        w_clean = re.sub(r"[^\w]", "", words[i].get("word", "").lower())
+        if w_clean in KNOWN_ENTITIES:
+            entity_idx = i
+            break
+
+    if entity_idx is not None:
+        s_start_idx = 0
+        for j in range(entity_idx - 1, -1, -1):
+            if words[j].get("start", 0) < min_time:
+                s_start_idx = j + 1
+                break
+            prev_raw = words[j].get("word", "")
+            if any(p in prev_raw for p in [".", "!", "?"]):
+                s_start_idx = j + 1
+                break
+            pause = words[j + 1].get("start", 0) - words[j].get("end", 0)
+            if pause >= 0.8:
+                s_start_idx = j + 1
+                break
+            s_start_idx = j
+
+        anchor_start = words[s_start_idx].get("start", target_start)
+        logger.info(
+            f"No-Ambiguity Hook: Anchored from {target_start:.1f}s backwards to Named Entity Introduction at {anchor_start:.1f}s "
+            f"('{words[s_start_idx].get('word')}...')"
+        )
+        return anchor_start
+
+    # Priority 3: Scan forwards up to 10 words to locate first unambiguous sentence start
+    for i in range(start_idx, min(start_idx + 10, len(words))):
+        w_clean = re.sub(r"[^\w]", "", words[i].get("word", "").lower())
+        if w_clean not in AMBIGUOUS_HOOK_WORDS:
+            return words[i].get("start", target_start)
+
+    return target_start
+
+
+def enforce_no_ambiguity_hook(
+    clip: ClipProposal,
+    words: list[dict[str, Any]],
+) -> ClipProposal:
+    """
+    Validates and enforces:
+    1. No-Ambiguity Hook rule (anchored to host question or named entity).
+    2. Strict 30-60s duration constraint.
+    3. Logical story arc & regeneration of Two-Category visual scenes with strict topic guard.
+    """
+    if not clip.segments:
+        return clip
+
+    orig_start = clip.segments[0].start
+    anchored_start = find_context_anchor_start(words, orig_start)
+    if anchored_start != orig_start:
+        clip.segments[0].start = round(anchored_start, 2)
+
+    # Balance total duration to stay strictly within 30.0s to 60.0s
+    total_dur = clip.total_duration
+    if total_dur < 30.0:
+        ext = round(32.0 - total_dur, 2)
+        clip.segments[-1].end = round(clip.segments[-1].end + ext, 2)
+    elif total_dur > 60.0:
+        excess = round(total_dur - 58.0, 2)
+        clip.segments[-1].end = round(max(clip.segments[-1].start + 5.0, clip.segments[-1].end - excess), 2)
+
+    # Update hook text to the initial 3.5-4.5s
+    clip_words = [
+        w for w in words
+        if any(s.start <= w.get("start", 0) <= s.end for s in clip.segments)
+    ]
+    if clip_words:
+        hook_slice = [
+            w["word"]
+            for w in clip_words
+            if w.get("start", 0) <= clip.segments[0].start + 4.5
+        ]
+        if hook_slice:
+            clip.hook = " ".join(hook_slice)
+
+    # Regenerate scenes with Two-Category visual directives and strict topic guard
+    clip.scenes = generate_heuristic_scenes(clip.total_duration, clip_words)
+    return clip
 
 
 def select_clips_heuristic(
@@ -482,6 +706,14 @@ def select_clips_heuristic(
             dur = e_t - s_t
             if 3.0 <= dur <= 4.5:
                 score = sum(word_scores[i : j + 1]) / dur
+                w_first = re.sub(r"[^\w']", "", words[i]["word"].lower())
+                if w_first in AMBIGUOUS_HOOK_WORDS:
+                    score *= 0.3
+                elif any(k in words[i]["word"].lower() for k in KNOWN_ENTITIES):
+                    score *= 1.5
+                elif "?" in words[i]["word"] or "!" in words[i]["word"]:
+                    score *= 1.4
+
                 hook_candidates.append({
                     "start": s_t,
                     "end": e_t,
@@ -493,7 +725,7 @@ def select_clips_heuristic(
 
     hook_candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    # 2. Identify top 30-45s discussion segments
+    # 2. Identify top 30-45s discussion segments (boosted by shocking climax / punchline)
     body_candidates: list[dict[str, Any]] = []
     for i in range(0, n, 5):
         s_t = words[i]["start"]
@@ -502,6 +734,9 @@ def select_clips_heuristic(
             dur = e_t - s_t
             if 30.0 <= dur <= 45.0:
                 score = sum(word_scores[i : j + 1]) / dur
+                end_words = " ".join(w["word"].lower() for w in words[max(i, j - 4) : j + 1])
+                if any(k in end_words for k in CLIMAX_KEYWORDS):
+                    score *= 1.35
                 body_candidates.append({
                     "start": s_t,
                     "end": e_t,
@@ -554,16 +789,17 @@ def select_clips_heuristic(
         total_dur = sum(s.end - s.start for s in segments)
         scenes = generate_heuristic_scenes(total_dur, clip_words)
 
-        proposals.append(
-            ClipProposal(
-                clip_id=idx,
-                title=f"uncensored_clip_{idx}_{int(segments[0].start)}s",
-                hook=hook_text,
-                rationale=f"High controversy score ({body['score']:.2f}) with explosive non-linear hook.",
-                segments=segments,
-                scenes=scenes,
-            )
+        prop = ClipProposal(
+            clip_id=idx,
+            title=f"uncensored_clip_{idx}_{int(segments[0].start)}s",
+            hook=hook_text,
+            rationale=f"High controversy score ({body['score']:.2f}) with explosive non-linear hook.",
+            segments=segments,
+            scenes=scenes,
         )
+        # Enforce No-Ambiguity Hook anchor and duration bounds
+        prop = enforce_no_ambiguity_hook(prop, words)
+        proposals.append(prop)
 
     logger.info(f"Heuristic selector created {len(proposals)} non-linear hook clip proposals.")
     return proposals
@@ -587,6 +823,8 @@ def select_viral_clips(
             proposals = select_clips_heuristic(words, num_clips=num_clips)
     else:
         proposals = select_clips_heuristic(words, num_clips=num_clips)
+
+    proposals = [enforce_no_ambiguity_hook(p, words) for p in proposals]
 
     output_json_path = Path(output_json_path)
     output_json_path.parent.mkdir(parents=True, exist_ok=True)
