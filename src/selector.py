@@ -85,6 +85,14 @@ class ClipProposal(BaseModel):
         default_factory=list,
         description="Timeline of visual direction scene cuts every 2-5s with layout modes and 2-4 search queries",
     )
+    needs_context_hook: bool = Field(
+        default=False,
+        description="Whether a Voice-of-God contextual intro hook is recommended",
+    )
+    voice_of_god_hook: str | None = Field(
+        default=None,
+        description="2-Sentence Voice-of-God hook script (accusation/context + shock payoff)",
+    )
 
     @property
     def total_duration(self) -> float:
@@ -98,6 +106,8 @@ class ClipProposal(BaseModel):
             "hook": self.hook,
             "rationale": self.rationale,
             "total_duration": round(self.total_duration, 2),
+            "needs_context_hook": self.needs_context_hook,
+            "voice_of_god_hook": self.voice_of_god_hook,
             "segments": [{"start": s.start, "end": s.end} for s in self.segments],
             "scenes": [
                 {
@@ -118,6 +128,14 @@ class DiscoveredStory(BaseModel):
     hook: str = Field(..., description="Exact shocking opening sentence from the transcript")
     start_sec: float = Field(..., description="Start timestamp in seconds in raw transcript")
     end_sec: float = Field(..., description="End timestamp in seconds in raw transcript")
+    needs_context_hook: bool = Field(
+        default=False,
+        description="Whether a Voice-of-God contextual hook is recommended",
+    )
+    voice_of_god_hook: str | None = Field(
+        default=None,
+        description="Suggested 2-Sentence Voice-of-God hook script",
+    )
 
     @property
     def time_range_str(self) -> str:
@@ -648,6 +666,45 @@ def find_context_anchor_start(
     return target_start
 
 
+def apply_audio_tail_protection(
+    segments: list[Segment],
+    words: list[dict[str, Any]],
+    min_tail: float = 0.8,
+    max_tail: float = 1.2,
+) -> list[Segment]:
+    """
+    Audio-Tail & Clean Outro:
+    Never cuts on the exact last syllable.
+    Finds the end of the last spoken word within the last segment and adds
+    0.8 to 1.2s safety pause buffer before the clip ends.
+    """
+    if not segments or not words:
+        return segments
+
+    last_seg = segments[-1]
+    # Find all words within the last segment
+    seg_words = [w for w in words if last_seg.start <= w.get("start", 0) <= last_seg.end + 0.3]
+    if seg_words:
+        last_word_end = max(w.get("end", last_seg.end) for w in seg_words)
+    else:
+        last_word_end = last_seg.end
+
+    # Check if there is a subsequent word in raw transcript to avoid cutting into the next sentence
+    subsequent_words = [w for w in words if w.get("start", 0) > last_word_end]
+    target_tail = 1.0  # ideal 1.0s within [0.8, 1.2]
+    if subsequent_words:
+        next_start = subsequent_words[0].get("start", last_word_end + 10.0)
+        gap = max(0.0, next_start - last_word_end - 0.05)
+        tail = max(min_tail, min(max_tail, gap))
+    else:
+        tail = target_tail
+
+    tail = max(min_tail, min(max_tail, tail))
+    new_end = round(last_word_end + tail, 2)
+    segments[-1].end = new_end
+    return segments
+
+
 def enforce_no_ambiguity_hook(
     clip: ClipProposal,
     words: list[dict[str, Any]],
@@ -655,8 +712,10 @@ def enforce_no_ambiguity_hook(
     """
     Validates and enforces:
     1. No-Ambiguity Hook rule (anchored to host question or named entity).
-    2. Strict 30-60s duration constraint.
-    3. Logical story arc & regeneration of Two-Category visual scenes with strict topic guard.
+    2. Audio-Tail Protection (0.8s - 1.2s safety pause buffer before end).
+    3. Strict 30-60s duration constraint.
+    4. Logical story arc & regeneration of Two-Category visual scenes with strict topic guard.
+    5. Evaluation of Voice-of-God contextual intro hook.
     """
     if not clip.segments:
         return clip
@@ -666,6 +725,9 @@ def enforce_no_ambiguity_hook(
     if anchored_start != orig_start:
         clip.segments[0].start = round(anchored_start, 2)
 
+    # Apply Audio-Tail Protection before duration balancing
+    clip.segments = apply_audio_tail_protection(clip.segments, words)
+
     # Balance total duration to stay strictly within 30.0s to 60.0s
     total_dur = clip.total_duration
     if total_dur < 30.0:
@@ -673,7 +735,11 @@ def enforce_no_ambiguity_hook(
         clip.segments[-1].end = round(clip.segments[-1].end + ext, 2)
     elif total_dur > 60.0:
         excess = round(total_dur - 58.0, 2)
-        clip.segments[-1].end = round(max(clip.segments[-1].start + 5.0, clip.segments[-1].end - excess), 2)
+        # If possible, reduce from intermediate segment to keep outro safety tail intact
+        if len(clip.segments) > 1 and (clip.segments[-2].end - clip.segments[-2].start) > (excess + 4.0):
+            clip.segments[-2].end = round(clip.segments[-2].end - excess, 2)
+        else:
+            clip.segments[-1].end = round(max(clip.segments[-1].start + 5.0, clip.segments[-1].end - excess), 2)
 
     # Update hook text to the initial 3.5-4.5s
     clip_words = [
@@ -686,6 +752,17 @@ def enforce_no_ambiguity_hook(
             for w in clip_words
             if w.get("start", 0) <= clip.segments[0].start + 4.5
         ]
+        if hook_slice:
+            clip.hook = " ".join(hook_slice)
+
+    # Evaluate Voice-of-God Context Need
+    if not clip.voice_of_god_hook:
+        from .hook_voice import evaluate_context_hook_need, generate_hook_formula
+        w_sample = [w.get("word", "") for w in clip_words[:6]]
+        needs_hook, reason = evaluate_context_hook_need(clip.rationale, clip.hook, w_sample)
+        clip.needs_context_hook = needs_hook
+        if needs_hook:
+            clip.voice_of_god_hook = generate_hook_formula(clip.rationale, clip.hook)
         if hook_slice:
             clip.hook = " ".join(hook_slice)
 
@@ -1303,6 +1380,10 @@ def format_storyboard_display(proposal: ClipProposal, story: DiscoveredStory | N
         lines.append(f"Original-Zeitbereich: {story.time_range_str}")
     lines.append(f"Geplante Short-Dauer: {proposal.total_duration:.1f}s (Non-linear verdichtet)")
     lines.append(f'Hook (0-3s): "{proposal.hook}"')
+    vog_status = "JA" if proposal.needs_context_hook else "NEIN"
+    lines.append(f"Voice-of-God Hook empfohlen: {vog_status}")
+    if proposal.voice_of_god_hook:
+        lines.append(f'Hook-Text: "{proposal.voice_of_god_hook}"')
     lines.append("")
     lines.append("--- NON-LINEARE SCHNITT-SEGMENTE ---")
     for idx, seg in enumerate(proposal.segments, start=1):

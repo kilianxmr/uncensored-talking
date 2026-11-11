@@ -274,17 +274,21 @@ def apply_focal_ken_burns(
     fps: int = 30,
 ) -> Path:
     """
-    Applies continuous Ken-Burns zoom (1.0x -> 1.15x) targeted at visual focal point (nx, ny).
-    Proportionally scales to target_width x target_height.
+    Applies smooth cubic spline / smoothstep Ken-Burns zoom (1.0x -> 1.15x) targeted at visual focal point (nx, ny):
+    - Smooth ease-in -> steady continuous drift -> smooth ease-out (no linear robotic jitter).
+    - Proportionally scales to target_width x target_height.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     nx, ny = find_visual_focal_point(image_path)
-    total_frames = int(duration * fps) + 5
-    zoom_step = 0.15 / max(1, total_frames)
+    total_frames = max(10, int(duration * fps) + 5)
+
+    # Cubic spline / smoothstep formula: S(p) = 3*p^2 - 2*p^3, where p = on / N
+    # Evaluates to 1.0 at on=0 and 1.15 at on=N with 0-derivative endpoints
+    spline_expr = f"1.0+0.15*(on/{total_frames}*on/{total_frames}*(3-2*on/{total_frames}))"
 
     # Zoom centered around focal point (nx, ny)
     filter_expr = (
-        f"zoompan=z='min(zoom+{zoom_step:.6f},1.15)':"
+        f"zoompan=z='{spline_expr}':"
         f"x='(iw-iw/zoom)*{nx:.3f}':"
         f"y='(ih-ih/zoom)*{ny:.3f}':"
         f"d={total_frames}:"

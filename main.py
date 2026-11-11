@@ -209,6 +209,17 @@ def main() -> None:
         help="Batch mode: process all discovered stories or default top stories non-interactively.",
     )
     parser.add_argument(
+        "--no-voice-of-god",
+        action="store_true",
+        help="Disable Voice-of-God contextual intro hook.",
+    )
+    parser.add_argument(
+        "--voice-of-god-text",
+        type=str,
+        default=None,
+        help="Explicit text for Voice-of-God contextual hook.",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose debug logging.",
@@ -378,6 +389,45 @@ def main() -> None:
             if not confirmed or proposal is None:
                 continue
 
+            # Voice-of-God Hook Configuration Prompt
+            enable_vog = not args.no_voice_of_god and (
+                proposal.needs_context_hook
+                or bool(proposal.voice_of_god_hook)
+                or bool(args.voice_of_god_text)
+            )
+            vog_text = args.voice_of_god_text or proposal.voice_of_god_hook
+
+            if enable_vog and not args.confirm_storyboard and not args.batch and not args.no_voice_of_god:
+                print("\n" + "-" * 64)
+                print(">>> VOICE-OF-GOD HOOK KONFIGURATION")
+                print(f"Voice-of-God Hook empfohlen: {'JA' if proposal.needs_context_hook else 'NEIN'}")
+                print(f'Hook-Text: "{vog_text}"')
+                print("Optionen:")
+                print("  [y] Hook bestätigen und rendern")
+                print("  [e] Hook-Text manuell editieren")
+                print("  [n] Hook überspringen (reines Podcast-Audio)")
+                try:
+                    vog_choice = input("Wähle Option (y / e / n) [Standard: y]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    vog_choice = "y"
+
+                if vog_choice in ("n", "no", "nein"):
+                    print("Voice-of-God Hook übersprungen.")
+                    enable_vog = False
+                    vog_text = None
+                elif vog_choice in ("e", "edit", "anpassen"):
+                    try:
+                        custom_vog = input("Neuer Voice-of-God Text: ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        custom_vog = vog_text
+                    if custom_vog:
+                        vog_text = custom_vog
+                        enable_vog = True
+                        print(f'Aktualisierter Voice-of-God Hook: "{vog_text}"')
+                else:
+                    print("Voice-of-God Hook bestätigt.")
+                    enable_vog = True
+
             # =================================================================
             # PHASE 3: Asset-Sourcing & Render
             # =================================================================
@@ -406,6 +456,8 @@ def main() -> None:
                 bg_music_path=bg_music,
                 bg_music_volume=args.bg_music_volume,
                 output_filename=f"story_{story.story_id}.mp4",
+                enable_voice_of_god=enable_vog,
+                voice_of_god_hook=vog_text,
             )
             rendered_clips.append(out_clip)
             size_mb = out_clip.stat().st_size / (1024 * 1024)

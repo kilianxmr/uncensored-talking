@@ -203,17 +203,32 @@ def render_scene_plate(
     orig_w: int,
     orig_h: int,
     output_plate: Path,
+    is_first_scene: bool = False,
+    is_last_scene: bool = False,
+    dip_to_black: bool = True,
 ) -> Path:
     """
     Renders a single scene plate:
     - full_speaker: 1080x1920 (proportional scale=-1:1920, smoothed face crop).
     - full_broll: 1080x1920 (proportional scale=-1:1920, center crop).
     - splitscreen: Top B-Roll 1080x960, Bottom Speaker 1080x960 (proportional scale=-1:960, smoothed face crop).
+    - Dip-to-Black: 5-frame (~0.15s) subtle brightness drop at cut transitions.
     """
     output_plate.parent.mkdir(parents=True, exist_ok=True)
     dur = scene.duration
     src_start = map_clip_time_to_source(scene.start, clip_segments)
     src_end = map_clip_time_to_source(scene.end, clip_segments)
+
+    # 5-frame (~0.15s) Dip-to-Black transition on scene boundaries
+    dip_filter = ""
+    if dip_to_black and (not is_first_scene or not is_last_scene):
+        dip_dur = min(0.15, max(0.04, dur * 0.25))
+        if not is_first_scene and not is_last_scene:
+            dip_filter = f",eq=brightness='if(lte(t,{dip_dur:.3f}),-0.35*(1-t/{dip_dur:.3f}),if(gte(t,{dur-dip_dur:.3f}),-0.35*(t-{dur-dip_dur:.3f})/{dip_dur:.3f},0))':eval=frame"
+        elif not is_first_scene:
+            dip_filter = f",eq=brightness='if(lte(t,{dip_dur:.3f}),-0.35*(1-t/{dip_dur:.3f}),0)':eval=frame"
+        elif not is_last_scene:
+            dip_filter = f",eq=brightness='if(gte(t,{dur-dip_dur:.3f}),-0.35*(t-{dur-dip_dur:.3f})/{dip_dur:.3f},0)':eval=frame"
 
     broll_path = Path(scene.broll_asset_path) if scene.broll_asset_path else None
 
@@ -231,7 +246,7 @@ def render_scene_plate(
         vf = (
             f"scale=-1:1920:flags=lanczos,"
             f"crop=1080:1920:{crop_x}:0,"
-            f"setsar=1,fps=30"
+            f"setsar=1,fps=30{dip_filter}"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -249,9 +264,9 @@ def render_scene_plate(
     # 2. full_broll (1080x1920)
     elif scene.layout == "full_broll":
         vf = (
-            "scale=-1:1920:flags=lanczos,"
-            "crop=1080:1920:(in_w-1080)/2:0,"
-            "setsar=1,fps=30"
+            f"scale=-1:1920:flags=lanczos,"
+            f"crop=1080:1920:(in_w-1080)/2:0,"
+            f"setsar=1,fps=30{dip_filter}"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -279,7 +294,7 @@ def render_scene_plate(
         filter_complex = (
             f"[0:v]scale=-1:960:flags=lanczos,crop=1080:960:(in_w-1080)/2:0,setsar=1,fps=30[top];"
             f"[1:v]scale=-1:960:flags=lanczos,crop=1080:960:{crop_x_split}:0,setsar=1,fps=30[bot];"
-            f"[top][bot]vstack=inputs=2[out]"
+            f"[top][bot]vstack=inputs=2{dip_filter}[out]"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -315,15 +330,21 @@ def render_clip(
     bg_music_path: Path | str | None = DEFAULT_BG_MUSIC_PATH,
     bg_music_volume: float = 0.12,
     output_filename: str | Path | None = None,
+    enable_voice_of_god: bool = True,
+    voice_of_god_hook: str | None = None,
 ) -> Path:
     """
     Renders complete viral short:
-    1. Renders scene cuts with anti-stretch proportional scaling & dynamic face tracking.
-    2. Stitches visual scene plates together.
-    3. Extracts master audio corresponding to non-linear cut segments.
-    4. Mixes pre-cut background music track ('Me and the Devil' from s32) under speech.
-    5. Burns in Pillow PNG gradient subtitles via FFmpeg overlay (or ASS fallback).
-    6. Exports with NVENC or libx264.
+    1. Renders scene cuts with anti-stretch proportional scaling, dynamic face tracking,
+       and 5-frame Dip-to-Black brightness transitions between scenes.
+    2. Voice-of-God Context Engine (if recommended/enabled):
+       - Slowed 85% speed vignetted plate.
+       - Ultra-deep voiceover with 60Hz sub-bass boom impulse.
+       - Phonk music muffled (450Hz low-pass) and volume lowered to 25%, with 0.35s release.
+       - Podcast audio muted during hook speech, then kicking in with full punch.
+    3. Master speech extraction with 0.2s smooth outro fade-out (afade=t=out:d=0.2).
+    4. Burns in subtitles with Excon Black font and pop-in animation.
+    5. Exports with NVENC or libx264.
     """
     source_video_path = Path(source_video_path).resolve()
     sub_arg = subtitles_source or subtitles_ass_path
@@ -367,8 +388,9 @@ def render_clip(
     temp_scenes_dir = Path("temp") / "scenes" / f"clip_{clip.clip_id}"
     temp_scenes_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Render each scene plate
+    # 1. Render each scene plate with Dip-to-Black cut transitions
     scene_plates: list[Path] = []
+    num_scenes = len(clip.scenes)
     for idx, scene in enumerate(clip.scenes, start=1):
         plate_file = temp_scenes_dir / f"scene_{idx}_{scene.layout}.mp4"
         rendered_plate = render_scene_plate(
@@ -378,18 +400,18 @@ def render_clip(
             orig_w=orig_w,
             orig_h=orig_h,
             output_plate=plate_file,
+            is_first_scene=(idx == 1),
+            is_last_scene=(idx == num_scenes),
+            dip_to_black=True,
         )
         scene_plates.append(rendered_plate)
 
-    # 2. Concat list file
-    concat_list_file = temp_scenes_dir / "concat_list.txt"
-    with open(concat_list_file, "w", encoding="utf-8") as f:
-        for plate in scene_plates:
-            f.write(f"file '{plate.resolve().as_posix()}'\n")
-
-    # 3. Master audio track extraction
+    # 2. Master audio track extraction with 0.2s Safety Outro Fade-Out
     clip_audio_file = temp_scenes_dir / "master_audio.wav"
     num_segs = len(clip.segments)
+    fade_start = max(0.0, clip.total_duration - 0.2)
+    fade_filter = f"afade=t=out:st={fade_start:.3f}:d=0.2"
+
     if num_segs == 1:
         seg = clip.segments[0]
         cmd_audio = [
@@ -398,6 +420,7 @@ def render_clip(
             "-t", f"{seg.end - seg.start:.3f}",
             "-i", str(source_video_path),
             "-vn",
+            "-af", fade_filter,
             "-acodec", "pcm_s16le",
             "-ar", "48000",
             "-ac", "2",
@@ -410,7 +433,7 @@ def render_clip(
                 f"[0:a]atrim=start={s.start:.3f}:end={s.end:.3f},asetpts=PTS-STARTPTS[a{i}]"
             )
         concat_inputs = "".join(f"[a{i}]" for i in range(num_segs))
-        filter_parts.append(f"{concat_inputs}concat=n={num_segs}:v=0:a=1[aout]")
+        filter_parts.append(f"{concat_inputs}concat=n={num_segs}:v=0:a=1,{fade_filter}[aout]")
         cmd_audio = [
             "ffmpeg", "-y",
             "-i", str(source_video_path),
@@ -423,7 +446,46 @@ def render_clip(
         ]
     subprocess.run(cmd_audio, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # 4. Final render with subtitle overlay
+    # Background music check
+    active_bg_music: Path | None = None
+    if bg_music_path:
+        bmp = Path(bg_music_path).resolve()
+        if bmp.is_file():
+            active_bg_music = bmp
+            logger.info(f"Embedding background music: {active_bg_music.name} (volume: {bg_music_volume:.2f})")
+        else:
+            logger.warning(f"Background music file not found at {bmp}. Proceeding without background music.")
+
+    # 3. Voice-of-God Hook Integration
+    vog_package = None
+    target_vog_text = voice_of_god_hook if voice_of_god_hook is not None else (
+        clip.voice_of_god_hook if clip.needs_context_hook else None
+    )
+
+    if enable_voice_of_god and target_vog_text:
+        try:
+            from .hook_voice import build_voice_of_god_hook
+            logger.info(f"Building Voice-of-God Hook package: '{target_vog_text}'")
+            vog_package = build_voice_of_god_hook(
+                hook_text=target_vog_text,
+                source_video=source_video_path,
+                bg_music_path=active_bg_music,
+                temp_dir=temp_scenes_dir,
+                clip_id=clip.clip_id,
+            )
+            # Prepend slow-mo vignetted plate to visual stream
+            scene_plates.insert(0, vog_package["plate_video"])
+        except Exception as exc:
+            logger.warning(f"Voice-of-God assembly failed ({exc}). Proceeding with standard layout.")
+            vog_package = None
+
+    # Write visual concat list file
+    concat_list_file = temp_scenes_dir / "concat_list.txt"
+    with open(concat_list_file, "w", encoding="utf-8") as f:
+        for plate in scene_plates:
+            f.write(f"file '{plate.resolve().as_posix()}'\n")
+
+    # 4. Final render with subtitle overlay & audio sidechaining
     if force_encoder:
         use_nvenc = force_encoder.lower() in ("nvenc", "h264_nvenc")
     else:
@@ -435,77 +497,176 @@ def render_clip(
         else:
             use_nvenc = check_nvenc_support()
 
-    active_bg_music: Path | None = None
-    if bg_music_path:
-        bmp = Path(bg_music_path).resolve()
-        if bmp.is_file():
-            active_bg_music = bmp
-            logger.info(f"Embedding background music: {active_bg_music.name} (volume: {bg_music_volume:.2f})")
-        else:
-            logger.warning(f"Background music file not found at {bmp}. Proceeding without background music.")
-
-    # Determine if subtitle source is PNG concat file or ASS file
     is_png_concat = subtitles_path.name.endswith(".txt") or (
         subtitles_path.is_file() and "subtitles_concat" in subtitles_path.name
     )
 
-    if is_png_concat:
-        # Burning via FFmpeg overlay
-        if active_bg_music:
-            filter_complex = [
-                "[0:v][1:v]overlay=0:0:shortest=1[v_final]",
-                "[2:a]volume=1.0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_speech]",
-                f"[3:a]volume={bg_music_volume:.2f},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_bg]",
-                "[a_speech][a_bg]amix=inputs=2:duration=first:dropout_transition=2[a_final]",
-            ]
-            cmd_final = [
-                "ffmpeg", "-y" if overwrite else "-n",
+    # Offset subtitles if Voice-of-God intro is present
+    effective_subtitles_path = subtitles_path
+    if vog_package:
+        vog_dur = vog_package["duration"]
+        if is_png_concat:
+            offset_concat = temp_scenes_dir / "subtitles_offset_concat.txt"
+            blank_png = subtitles_path.parent / "blank.png"
+            if not blank_png.exists():
+                from PIL import Image
+                Image.new("RGBA", (1080, 1920), (0, 0, 0, 0)).save(blank_png, "PNG")
+            with open(subtitles_path, "r", encoding="utf-8") as sf:
+                sub_content = sf.read()
+            offset_content = f"file '{blank_png.resolve().as_posix()}'\nduration {vog_dur:.3f}\n" + sub_content
+            with open(offset_concat, "w", encoding="utf-8") as of:
+                of.write(offset_content)
+            effective_subtitles_path = offset_concat
+        else:
+            # Offset ASS dialogue events
+            from .subtitles import format_ass_timestamp
+            offset_ass = temp_scenes_dir / f"clip_{clip.clip_id}_offset.ass"
+            new_lines = []
+            with open(subtitles_path, "r", encoding="utf-8") as af:
+                for line in af:
+                    if line.startswith("Dialogue:"):
+                        parts = line.split(",", 9)
+                        if len(parts) >= 10:
+                            # Parse start and end timestamps H:MM:SS.cs
+                            def parse_ass_ts(ts_str: str) -> float:
+                                h, m, s = ts_str.split(":")
+                                return int(h) * 3600 + int(m) * 60 + float(s)
+                            st = parse_ass_ts(parts[1]) + vog_dur
+                            et = parse_ass_ts(parts[2]) + vog_dur
+                            parts[1] = format_ass_timestamp(st)
+                            parts[2] = format_ass_timestamp(et)
+                            new_lines.append(",".join(parts))
+                        else:
+                            new_lines.append(line)
+                    else:
+                        new_lines.append(line)
+            offset_ass.write_text("".join(new_lines), encoding="utf-8")
+            effective_subtitles_path = offset_ass
+
+    # Build FFmpeg command based on Voice-of-God & Background Music configuration
+    if vog_package:
+        vog_dur = vog_package["duration"]
+        vog_audio = vog_package["voice_audio"]
+        sub_boom = vog_package["sub_boom"]
+
+        # Audio inputs: 0:concat_list(v), 1:subtitles(if png), 2:clip_audio, 3:vog_audio, 4:sub_boom, 5:bg_music
+        if is_png_concat:
+            audio_idx_speech = 2
+            audio_idx_vog = 3
+            audio_idx_boom = 4
+            audio_idx_bg = 5
+
+            v_expr = "[0:v][1:v]overlay=0:0:shortest=1[v_final]"
+            cmd_inputs = [
                 "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
-                "-f", "concat", "-safe", "0", "-i", str(subtitles_path),
+                "-f", "concat", "-safe", "0", "-i", str(effective_subtitles_path),
                 "-i", str(clip_audio_file),
-                "-stream_loop", "-1", "-i", str(active_bg_music),
-                "-filter_complex", ";".join(filter_complex),
-                "-map", "[v_final]",
-                "-map", "[a_final]",
+                "-i", str(vog_audio),
+                "-i", str(sub_boom),
             ]
         else:
-            cmd_final = [
-                "ffmpeg", "-y" if overwrite else "-n",
+            audio_idx_speech = 1
+            audio_idx_vog = 2
+            audio_idx_boom = 3
+            audio_idx_bg = 4
+            escaped_ass = effective_subtitles_path.as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+            v_expr = f"[0:v]ass='{escaped_ass}':fontsdir='assets/fonts'[v_final]"
+            cmd_inputs = [
                 "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
-                "-f", "concat", "-safe", "0", "-i", str(subtitles_path),
                 "-i", str(clip_audio_file),
-                "-filter_complex", "[0:v][1:v]overlay=0:0:shortest=1[v_final]",
-                "-map", "[v_final]",
-                "-map", "2:a",
+                "-i", str(vog_audio),
+                "-i", str(sub_boom),
             ]
+
+        # Speech is delayed by vog_dur
+        speech_delay_ms = int(vog_dur * 1000)
+        filter_complex = [
+            v_expr,
+            f"[{audio_idx_speech}:a]adelay={speech_delay_ms}|{speech_delay_ms},volume=1.0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_speech_del]",
+            f"[{audio_idx_vog}:a]volume=1.2,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_vog]",
+            f"[{audio_idx_boom}:a]volume=1.0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_boom]",
+        ]
+
+        if active_bg_music:
+            cmd_inputs.extend(["-stream_loop", "-1", "-i", str(active_bg_music)])
+            bg_vol = bg_music_volume
+            # Phonk music: muffled (lowpass 450Hz) and lowered to 25% during Voice of God, then 0.35s smooth release
+            bg_filter = (
+                f"[{audio_idx_bg}:a]lowpass=f=450:enable='lte(t,{vog_dur})',"
+                f"volume=eval=frame:volume='if(lte(t,{vog_dur}),{0.25*bg_vol:.4f},if(lte(t,{vog_dur+0.35:.3f}),{0.25*bg_vol:.4f}+(t-{vog_dur})*{0.75*bg_vol:.4f}/0.35,{bg_vol:.4f}))',"
+                f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_bg]"
+            )
+            filter_complex.append(bg_filter)
+            filter_complex.append("[a_speech_del][a_vog][a_boom][a_bg]amix=inputs=4:duration=first:dropout_transition=2[a_final]")
+        else:
+            filter_complex.append("[a_speech_del][a_vog][a_boom]amix=inputs=3:duration=first:dropout_transition=2[a_final]")
+
+        cmd_final = [
+            "ffmpeg", "-y" if overwrite else "-n",
+            *cmd_inputs,
+            "-filter_complex", ";".join(filter_complex),
+            "-map", "[v_final]",
+            "-map", "[a_final]",
+        ]
+
     else:
-        # Fallback ASS burning
-        escaped_ass = subtitles_path.as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-        if active_bg_music:
-            filter_complex = [
-                f"[0:v]ass='{escaped_ass}'[v_final]",
-                "[1:a]volume=1.0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_speech]",
-                f"[2:a]volume={bg_music_volume:.2f},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_bg]",
-                "[a_speech][a_bg]amix=inputs=2:duration=first:dropout_transition=2[a_final]",
-            ]
-            cmd_final = [
-                "ffmpeg", "-y" if overwrite else "-n",
-                "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
-                "-i", str(clip_audio_file),
-                "-stream_loop", "-1", "-i", str(active_bg_music),
-                "-filter_complex", ";".join(filter_complex),
-                "-map", "[v_final]",
-                "-map", "[a_final]",
-            ]
+        # Standard rendering without Voice-of-God
+        if is_png_concat:
+            if active_bg_music:
+                filter_complex = [
+                    "[0:v][1:v]overlay=0:0:shortest=1[v_final]",
+                    "[2:a]volume=1.0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_speech]",
+                    f"[3:a]volume={bg_music_volume:.2f},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_bg]",
+                    "[a_speech][a_bg]amix=inputs=2:duration=first:dropout_transition=2[a_final]",
+                ]
+                cmd_final = [
+                    "ffmpeg", "-y" if overwrite else "-n",
+                    "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+                    "-f", "concat", "-safe", "0", "-i", str(effective_subtitles_path),
+                    "-i", str(clip_audio_file),
+                    "-stream_loop", "-1", "-i", str(active_bg_music),
+                    "-filter_complex", ";".join(filter_complex),
+                    "-map", "[v_final]",
+                    "-map", "[a_final]",
+                ]
+            else:
+                cmd_final = [
+                    "ffmpeg", "-y" if overwrite else "-n",
+                    "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+                    "-f", "concat", "-safe", "0", "-i", str(effective_subtitles_path),
+                    "-i", str(clip_audio_file),
+                    "-filter_complex", "[0:v][1:v]overlay=0:0:shortest=1[v_final]",
+                    "-map", "[v_final]",
+                    "-map", "2:a",
+                ]
         else:
-            cmd_final = [
-                "ffmpeg", "-y" if overwrite else "-n",
-                "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
-                "-i", str(clip_audio_file),
-                "-vf", f"ass='{escaped_ass}'",
-                "-map", "0:v",
-                "-map", "1:a",
-            ]
+            # ASS Subtitles
+            escaped_ass = effective_subtitles_path.as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+            if active_bg_music:
+                filter_complex = [
+                    f"[0:v]ass='{escaped_ass}':fontsdir='assets/fonts'[v_final]",
+                    "[1:a]volume=1.0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_speech]",
+                    f"[2:a]volume={bg_music_volume:.2f},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a_bg]",
+                    "[a_speech][a_bg]amix=inputs=2:duration=first:dropout_transition=2[a_final]",
+                ]
+                cmd_final = [
+                    "ffmpeg", "-y" if overwrite else "-n",
+                    "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+                    "-i", str(clip_audio_file),
+                    "-stream_loop", "-1", "-i", str(active_bg_music),
+                    "-filter_complex", ";".join(filter_complex),
+                    "-map", "[v_final]",
+                    "-map", "[a_final]",
+                ]
+            else:
+                cmd_final = [
+                    "ffmpeg", "-y" if overwrite else "-n",
+                    "-f", "concat", "-safe", "0", "-i", str(concat_list_file),
+                    "-i", str(clip_audio_file),
+                    "-vf", f"ass='{escaped_ass}':fontsdir='assets/fonts'",
+                    "-map", "0:v",
+                    "-map", "1:a",
+                ]
 
     if use_nvenc:
         cmd_final.extend([

@@ -380,16 +380,38 @@ def generate_ass_subtitles(
     clip: ClipProposal,
     word_timestamps_file: Path | str = Path("temp/word_timestamps.json"),
     output_ass_path: Path | str | None = None,
+    pop_in_animation: bool = True,
     **kwargs,
 ) -> Path:
-    """Wrapper ensuring backward compatibility: writes ASS file and generates PNGs."""
-    concat_txt, timed_chunks = generate_png_subtitles(clip, word_timestamps_file=word_timestamps_file)
+    """
+    Generates advanced ASS subtitle file with animated pop-in tags:
+    - Font: Excon-Black, UPPERCASE, Alignment: 5 (Center)
+    - Colors: Vertical yellow-orange tone with bold black outline
+    - Pop-in: \\alpha&HFF&\\fscx75\\fscy75\\t(0,120,\\alpha&H00&\\fscx100\\fscy100)
+    """
+    word_timestamps_file = Path(word_timestamps_file)
+    if not word_timestamps_file.exists():
+        raise FileNotFoundError(f"Word timestamps file not found: {word_timestamps_file}")
+
+    with open(word_timestamps_file, "r", encoding="utf-8") as f:
+        words = json.load(f)
+
+    local_words = map_words_to_clip_timeline(words, clip.segments)
+    raw_chunks = chunk_words_gradient(local_words)
+    timed_chunks = apply_hold_duration(
+        raw_chunks,
+        clip_total_duration=clip.total_duration,
+        min_hold=0.5,
+        max_hold=0.8,
+    )
 
     if output_ass_path is None:
         output_ass_path = Path(f"temp/clip_{clip.clip_id}.ass")
     output_ass_path = Path(output_ass_path)
     output_ass_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # PrimaryColour is in &HAABBGGRR&: #FFDD00 (R=FF, G=DD, B=00) -> &H0000DDFF&
+    # SecondaryColour is #FF7700 (R=FF, G=77, B=00) -> &H000077FF&
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -398,16 +420,22 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,The Bold Font,84,&H002BF7FF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,4.0,2.0,5,30,30,0,1
+Style: Default,Excon Black,70,&H0000DDFF,&H000077FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,7.5,0.0,5,30,30,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [header]
+    anim_tag = r"{\alpha&HFF&\fscx75\fscy75\t(0,120,\alpha&H00&\fscx100\fscy100)}" if pop_in_animation else ""
+
     for c in timed_chunks:
         start_str = format_ass_timestamp(c["start"])
         end_str = format_ass_timestamp(c["end"])
-        lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{c['text']}")
+        chunk_text = c["text"]
+        lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{anim_tag}{chunk_text}")
 
     output_ass_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info(
+        f"Generated ASS animated subtitles for clip {clip.clip_id}: {output_ass_path} ({len(timed_chunks)} chunks)"
+    )
     return output_ass_path
